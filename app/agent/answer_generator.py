@@ -29,6 +29,15 @@ def generate_answer(question: str, retrieved: list[RetrievedChunk]) -> AnswerWit
         api_key=settings.OPENAI_API_KEY,
         base_url=settings.OPENAI_BASE_URL,
         http_client=httpx.Client(trust_env=False),
+        http_socket_options=(),
     )
-    response = llm.invoke(prompt)
+    try:
+        response = llm.invoke(prompt)
+    except Exception as exc:
+        if "token_invalidated" in str(exc) or "401 Unauthorized" in str(exc):
+            raise RuntimeError(
+                "AIClient2API ChatGPT/Codex OAuth token is invalidated. "
+                "Please sign in again in AIClient2API, then rerun RAG."
+            ) from exc
+        raise
     return AnswerWithCitations(answer=str(response.content), citations=citations)

@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.agent.answer_generator import generate_answer
 from app.retrieval.vector_retriever import VectorRetriever
+from app.services.aiclient2api import ensure_aiclient2api_running
 
 
 def print_debug_results(retrieved) -> None:
@@ -18,6 +19,9 @@ def print_debug_results(retrieved) -> None:
 
 
 def main() -> None:
+    if not ensure_aiclient2api_running():
+        raise SystemExit("AIClient2API is not healthy. Run: python scripts/start_api.py")
+
     print("Reading memory assistant. Type /exit to quit.")
     print("Use /debug on or /debug off to toggle retrieval details.")
     retriever = VectorRetriever()
@@ -42,7 +46,11 @@ def main() -> None:
         if debug:
             print_debug_results(retrieved)
 
-        result = generate_answer(question, retrieved)
+        try:
+            result = generate_answer(question, retrieved)
+        except RuntimeError as exc:
+            print(f"Error: {exc}")
+            continue
         print(result.answer)
         if result.citations:
             print("\nCitations:")

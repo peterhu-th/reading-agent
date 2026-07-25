@@ -6,7 +6,7 @@ from langchain_core.documents import Document
 
 from app.config import get_settings
 from app.models.schemas import TextChunk
-from app.retrieval.local_embeddings import LocalHashEmbeddings
+from app.retrieval.embedding_factory import make_embeddings
 
 CHROMA_BATCH_SIZE = 5000
 
@@ -24,10 +24,6 @@ def load_chunks(path: str) -> list[TextChunk]:
                 continue
             chunks.append(TextChunk(**json.loads(line)))
     return chunks
-
-
-def make_embeddings() -> LocalHashEmbeddings:
-    return LocalHashEmbeddings()
 
 
 def chunk_to_document(chunk: TextChunk) -> Document:

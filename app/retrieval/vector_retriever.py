@@ -2,7 +2,7 @@ from langchain_chroma import Chroma
 
 from app.config import get_settings
 from app.models.schemas import RetrievedChunk, TextChunk
-from app.retrieval.local_embeddings import LocalHashEmbeddings
+from app.retrieval.embedding_factory import make_embeddings
 
 
 class VectorRetriever:
@@ -12,7 +12,7 @@ class VectorRetriever:
         settings = get_settings()
         self.vectorstore = Chroma(
             collection_name=settings.CHROMA_COLLECTION,
-            embedding_function=LocalHashEmbeddings(),
+            embedding_function=make_embeddings(),
             persist_directory=settings.VECTOR_DB_PATH,
         )
 

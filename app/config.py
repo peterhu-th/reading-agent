@@ -14,7 +14,14 @@ class Settings(BaseModel):
     OPENAI_API_KEY: str = Field(min_length=1)
     OPENAI_BASE_URL: str = Field(min_length=1)
     CHAT_MODEL: str = Field(default="gpt-5.4", min_length=1)
-    EMBEDDING_MODEL: str = Field(default="text-embedding-3-small", min_length=1)
+    AUTO_START_API: bool = True
+    AICLIENT2API_DIR: str = "D:/gitstore/AIClient2API"
+    API_START_TIMEOUT_SECONDS: int = Field(default=30, ge=1)
+    EMBEDDING_BACKEND: str = Field(default="local-hash", min_length=1)
+    EMBEDDING_MODEL: str = Field(default="local-hash", min_length=1)
+    EMBEDDING_DEVICE: str = "cpu"
+    EMBEDDING_BATCH_SIZE: int = Field(default=64, ge=1)
+    EMBEDDING_LOCAL_FILES_ONLY: bool = True
     # 向量索引文件
     VECTOR_DB_PATH: str = "./data/index/chroma"
     RAW_EPUB_DIR: str = "./data/raw/epub"
@@ -31,7 +38,15 @@ def get_settings() -> Settings:
         OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),
         OPENAI_BASE_URL=os.getenv("OPENAI_BASE_URL", ""),
         CHAT_MODEL=os.getenv("CHAT_MODEL", "gpt-5.4"),
-        EMBEDDING_MODEL=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        AUTO_START_API=os.getenv("AUTO_START_API", "true").lower() in {"1", "true", "yes", "on"},
+        AICLIENT2API_DIR=os.getenv("AICLIENT2API_DIR", "D:/gitstore/AIClient2API"),
+        API_START_TIMEOUT_SECONDS=int(os.getenv("API_START_TIMEOUT_SECONDS", "30")),
+        EMBEDDING_BACKEND=os.getenv("EMBEDDING_BACKEND", "local-hash"),
+        EMBEDDING_MODEL=os.getenv("EMBEDDING_MODEL", "local-hash"),
+        EMBEDDING_DEVICE=os.getenv("EMBEDDING_DEVICE", "cpu"),
+        EMBEDDING_BATCH_SIZE=int(os.getenv("EMBEDDING_BATCH_SIZE", "64")),
+        EMBEDDING_LOCAL_FILES_ONLY=os.getenv("EMBEDDING_LOCAL_FILES_ONLY", "true").lower()
+        in {"1", "true", "yes", "on"},
         VECTOR_DB_PATH=os.getenv("VECTOR_DB_PATH", "./data/index/chroma"),
         RAW_EPUB_DIR=os.getenv("RAW_EPUB_DIR", "./data/raw/epub"),
         BOOKS_JSONL_PATH=os.getenv(
