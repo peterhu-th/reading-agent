@@ -42,6 +42,43 @@ def make_chunk(
     )
 
 
+def split_long_paragraph(paragraph: BookParagraph, chunk_size: int) -> list[BookParagraph]:
+    """Split one oversized paragraph into paragraph-shaped slices."""
+    parts: list[BookParagraph] = []
+    for offset in range(0, len(paragraph.text), chunk_size):
+        text = paragraph.text[offset : offset + chunk_size].strip()
+        if not text:
+            continue
+        parts.append(
+            paragraph.model_copy(
+                update={
+                    "paragraph_index": paragraph.paragraph_index + len(parts),
+                    "text": text,
+                }
+            )
+        )
+    return parts
+
+
+def paragraph_text(paragraphs: list[BookParagraph]) -> str:
+    return "\n".join(paragraph.text for paragraph in paragraphs)
+
+
+def overlap_tail(paragraphs: list[BookParagraph], overlap: int) -> list[BookParagraph]:
+    """Return whole trailing paragraphs whose combined text is near overlap."""
+    if overlap <= 0:
+        return []
+
+    selected: list[BookParagraph] = []
+    total = 0
+    for paragraph in reversed(paragraphs):
+        selected.insert(0, paragraph)
+        total += len(paragraph.text) + (1 if selected else 0)
+        if total >= overlap:
+            break
+    return selected
+
+
 def chunk_chapter(
     paragraphs: list[BookParagraph],
     chunk_size: int = 600,
@@ -55,16 +92,24 @@ def chunk_chapter(
     if overlap < 0:
         raise ValueError("overlap must not be negative")
 
+    expanded_paragraphs: list[BookParagraph] = []
+    for paragraph in paragraphs:
+        if len(paragraph.text) > chunk_size:
+            expanded_paragraphs.extend(split_long_paragraph(paragraph, chunk_size))
+        else:
+            expanded_paragraphs.append(paragraph)
+
     chunks: list[TextChunk] = []
     current_paragraphs: list[BookParagraph] = []
     current_text = ""
 
-    for paragraph in paragraphs:
+    for paragraph in expanded_paragraphs:
         candidate = paragraph.text if not current_text else f"{current_text}\n{paragraph.text}"
         if current_text and len(candidate) > chunk_size:
             chunks.append(make_chunk(current_paragraphs, len(chunks), current_text))
-            current_paragraphs = [paragraph]
-            current_text = paragraph.text
+            current_paragraphs = overlap_tail(current_paragraphs, overlap)
+            current_paragraphs.append(paragraph)
+            current_text = paragraph_text(current_paragraphs)
         else:
             current_paragraphs.append(paragraph)
             current_text = candidate

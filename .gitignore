@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.pyrefly/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -37,9 +38,20 @@ dist/
 logs/
 tmp/
 temp/
+*.tmp
+*.bak
 
 # Local data and generated indexes
 data/
+
+# Local model files
+models/
+
+# Local inspection and generated reports
+*.jsonl.tmp
+retrieval_debug*.txt
+prompt_log*
+work/
 
 # OS files
 .DS_Store

@@ -26,8 +26,9 @@ def build_citations(retrieved: list[RetrievedChunk]) -> list[str]:
     citations: list[str] = []
     for index, item in enumerate(retrieved, start=1):
         chunk = item.chunk
+        chapter = chunk.chapter_title or f"第 {chunk.chapter_index} 章"
         citations.append(
             f"[{index}] {chunk.title} / {chunk.author or 'unknown'} / "
-            f"{chunk.chapter_title or chunk.chapter_index} / {chunk.chunk_id}"
+            f"{chapter} / 段落 {chunk.start_paragraph_index}-{chunk.end_paragraph_index}"
         )
     return citations

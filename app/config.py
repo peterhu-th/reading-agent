@@ -28,6 +28,13 @@ class Settings(BaseModel):
     BOOKS_JSONL_PATH: str = "./data/processed/books_jsonl/books.jsonl"
     CHUNKS_JSONL_PATH: str = "./data/processed/chunks_jsonl/chunks.jsonl"
     CHROMA_COLLECTION: str = "reading_memory_chunks"
+    VECTOR_INITIAL_K: int = Field(default=40, ge=1)
+    KEYWORD_INITIAL_K: int = Field(default=40, ge=1)
+    RERANK_TOP_K: int = Field(default=15, ge=1)
+    FINAL_TOP_K: int = Field(default=10, ge=1)
+    CONTEXT_MAX_CHARS: int = Field(default=9000, ge=1000)
+    CHUNK_SIZE: int = Field(default=900, ge=100)
+    CHUNK_OVERLAP: int = Field(default=180, ge=0)
 
 # 缓存装饰器：第一次运行创建 Setting 对象，后续调用直接返回创建好的对象
 @lru_cache(maxsize=1)
@@ -58,4 +65,11 @@ def get_settings() -> Settings:
             "./data/processed/chunks_jsonl/chunks.jsonl",
         ),
         CHROMA_COLLECTION=os.getenv("CHROMA_COLLECTION", "reading_memory_chunks"),
+        VECTOR_INITIAL_K=int(os.getenv("VECTOR_INITIAL_K", "40")),
+        KEYWORD_INITIAL_K=int(os.getenv("KEYWORD_INITIAL_K", "40")),
+        RERANK_TOP_K=int(os.getenv("RERANK_TOP_K", "15")),
+        FINAL_TOP_K=int(os.getenv("FINAL_TOP_K", "10")),
+        CONTEXT_MAX_CHARS=int(os.getenv("CONTEXT_MAX_CHARS", "9000")),
+        CHUNK_SIZE=int(os.getenv("CHUNK_SIZE", "900")),
+        CHUNK_OVERLAP=int(os.getenv("CHUNK_OVERLAP", "180")),
     )

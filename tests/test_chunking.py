@@ -28,6 +28,16 @@ def test_chunk_paragraphs_creates_chunks():
     assert chunks[0].title == "Test Book"
 
 
+def test_chunk_paragraphs_uses_overlap():
+    paragraphs = [make_paragraph(i, f"paragraph-{i} " * 5) for i in range(6)]
+    chunks = chunk_paragraphs(paragraphs, chunk_size=90, overlap=40)
+
+    assert len(chunks) > 1
+    assert chunks[0].end_paragraph_index >= chunks[1].start_paragraph_index
+    assert "paragraph-0" in chunks[0].text
+    assert "paragraph-0" in chunks[1].text
+
+
 def test_chunk_paragraphs_does_not_cross_chapters():
     paragraphs = [
         make_paragraph(0, "chapter zero text " * 10, chapter_index=0),
@@ -35,3 +45,12 @@ def test_chunk_paragraphs_does_not_cross_chapters():
     ]
     chunks = chunk_paragraphs(paragraphs, chunk_size=1000)
     assert {chunk.chapter_index for chunk in chunks} == {0, 1}
+
+
+def test_chunk_ids_are_stable_for_same_input():
+    paragraphs = [make_paragraph(i, "stable text " * 8) for i in range(3)]
+
+    first = chunk_paragraphs(paragraphs, chunk_size=120, overlap=30)
+    second = chunk_paragraphs(paragraphs, chunk_size=120, overlap=30)
+
+    assert [chunk.chunk_id for chunk in first] == [chunk.chunk_id for chunk in second]

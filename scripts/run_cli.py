@@ -4,18 +4,33 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.agent.answer_generator import generate_answer
-from app.retrieval.vector_retriever import VectorRetriever
+from app.models.schemas import RetrievalResult
+from app.retrieval.hybrid_retriever import EnhancedRetriever
 from app.services.aiclient2api import ensure_aiclient2api_running
 
 
-def print_debug_results(retrieved) -> None:
-    for index, item in enumerate(retrieved, start=1):
-        chunk = item.chunk
-        print(
-            f"[{index}] score={item.score} title={chunk.title} "
-            f"chapter={chunk.chapter_title or chunk.chapter_index} "
-            f"chunk_id={chunk.chunk_id}"
-        )
+def print_retrieval_summary(result: RetrievalResult) -> None:
+    count = len(result.chunks)
+    if count == 0:
+        print("未找到足够相关的书籍片段。")
+        return
+
+    titles = []
+    for item in result.chunks:
+        title = item.chunk.title
+        if title not in titles:
+            titles.append(title)
+    title_text = "、".join(titles[:3])
+    if len(titles) > 3:
+        title_text += f" 等 {len(titles)} 本"
+    print(f"已检索到 {count} 条相关证据，来源：{title_text}")
+
+
+def print_debug_results(result: RetrievalResult) -> None:
+    print("\n检索调试信息：")
+    for line in result.debug.lines:
+        print(line)
+    print()
 
 
 def main() -> None:
@@ -24,7 +39,7 @@ def main() -> None:
 
     print("Reading memory assistant. Type /exit to quit.")
     print("Use /debug on or /debug off to toggle retrieval details.")
-    retriever = VectorRetriever()
+    retriever = EnhancedRetriever()
     debug = False
 
     while True:
@@ -42,18 +57,20 @@ def main() -> None:
             print("Debug off")
             continue
 
-        retrieved = retriever.search(question, top_k=5)
+        retrieval_result = retriever.search(question, debug=debug)
         if debug:
-            print_debug_results(retrieved)
+            print_debug_results(retrieval_result)
+        else:
+            print_retrieval_summary(retrieval_result)
 
         try:
-            result = generate_answer(question, retrieved)
+            result = generate_answer(question, retrieval_result.chunks)
         except RuntimeError as exc:
             print(f"Error: {exc}")
             continue
         print(result.answer)
         if result.citations:
-            print("\nCitations:")
+            print("\n引用来源：")
             for citation in result.citations:
                 print(citation)
 

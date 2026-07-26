@@ -31,7 +31,11 @@ def main() -> None:
         all_paragraphs.extend(paragraphs)
         print(f"Loaded {len(paragraphs)} paragraphs from {epub_path.name}")
 
-    chunks = chunk_paragraphs(all_paragraphs)
+    chunks = chunk_paragraphs(
+        all_paragraphs,
+        chunk_size=settings.CHUNK_SIZE,
+        overlap=settings.CHUNK_OVERLAP,
+    )
     write_jsonl(settings.BOOKS_JSONL_PATH, all_paragraphs)
     write_jsonl(settings.CHUNKS_JSONL_PATH, chunks)
 
