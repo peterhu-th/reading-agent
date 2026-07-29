@@ -1,6 +1,10 @@
 from collections import defaultdict
+import re
 
 from app.models.schemas import BookParagraph, TextChunk
+
+
+SENTENCE_END_PATTERN = re.compile(r"[。！？；.!?;][”’」』）】》]*")
 
 
 def group_paragraphs(
@@ -43,21 +47,39 @@ def make_chunk(
 
 
 def split_long_paragraph(paragraph: BookParagraph, chunk_size: int) -> list[BookParagraph]:
-    """Split one oversized paragraph into paragraph-shaped slices."""
+    """Split one oversized paragraph near sentence boundaries."""
     parts: list[BookParagraph] = []
-    for offset in range(0, len(paragraph.text), chunk_size):
-        text = paragraph.text[offset : offset + chunk_size].strip()
+    start = 0
+    text_value = paragraph.text
+    while start < len(text_value):
+        end = choose_split_end(text_value, start, chunk_size)
+        text = text_value[start:end].strip()
         if not text:
-            continue
+            break
         parts.append(
             paragraph.model_copy(
                 update={
-                    "paragraph_index": paragraph.paragraph_index + len(parts),
+                    "paragraph_index": paragraph.paragraph_index * 1000 + len(parts),
                     "text": text,
                 }
             )
         )
+        start = end
     return parts
+
+
+def choose_split_end(text: str, start: int, chunk_size: int) -> int:
+    hard_end = min(start + chunk_size, len(text))
+    if hard_end >= len(text):
+        return len(text)
+
+    window = text[start:hard_end]
+    matches = list(SENTENCE_END_PATTERN.finditer(window))
+    if matches:
+        boundary = start + matches[-1].end()
+        if boundary > start:
+            return boundary
+    return hard_end
 
 
 def paragraph_text(paragraphs: list[BookParagraph]) -> str:

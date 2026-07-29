@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 
 import argparse
@@ -13,7 +13,7 @@ from typing import Any
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from ebooklib import ITEM_DOCUMENT, epub
 
-from app.ingestion.normalize import is_useful_paragraph, normalize_whitespace
+from app.ingestion.normalize import is_retrievable_paragraph, normalize_whitespace
 from app.models.schemas import BookParagraph
 
 DEFAULT_MAX_CHARS = 1000
@@ -184,28 +184,43 @@ def chapters_to_paragraphs(
     author = ", ".join(metadata.authors)
     paragraphs: list[BookParagraph] = []
 
+    output_chapter_index = 0
     for chapter in chapters:
-        paragraph_index = 0
+        if not is_retrievable_chapter(chapter.title):
+            continue
+        chapter_texts: list[str] = []
         for raw_paragraph in normalize_block_text(chapter.text).split("\n"):
             text = normalize_whitespace(raw_paragraph)
-            if not is_useful_paragraph(text):
+            if not is_retrievable_paragraph(text):
                 continue
+            chapter_texts.append(text)
 
+        if not chapter_texts:
+            continue
+
+        for paragraph_index, text in enumerate(chapter_texts):
             paragraphs.append(
                 BookParagraph(
                     book_id=book_id,
                     title=title,
                     author=author,
                     source_path=source_path,
-                    chapter_index=chapter.chapter_index,
+                    chapter_index=output_chapter_index,
                     chapter_title=chapter.title or "",
                     paragraph_index=paragraph_index,
                     text=text,
                 )
             )
-            paragraph_index += 1
+        output_chapter_index += 1
 
     return paragraphs
+
+
+def is_retrievable_chapter(title: str | None) -> bool:
+    clean = normalize_inline_text(title)
+    if not clean:
+        return True
+    return clean not in {"目录", "版权", "封面", "扉页", "描述"}
 
 
 def extract_html_documents(book: epub.EpubBook) -> list[dict[str, Any]]:

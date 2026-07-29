@@ -4,7 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.agent.answer_generator import generate_answer
-from app.models.schemas import RetrievalResult
+from app.memory.conversation_memory import render_history, update_conversation
+from app.models.schemas import ConversationSession, RetrievalResult
 from app.retrieval.hybrid_retriever import EnhancedRetriever
 from app.services.aiclient2api import ensure_aiclient2api_running
 
@@ -23,7 +24,10 @@ def print_retrieval_summary(result: RetrievalResult) -> None:
     title_text = "、".join(titles[:3])
     if len(titles) > 3:
         title_text += f" 等 {len(titles)} 本"
-    print(f"已检索到 {count} 条相关证据，来源：{title_text}")
+    print(
+        f"已检索到 {count} 条相关证据，来源：{title_text}；"
+        f"重排：{result.debug.reranker_backend}"
+    )
 
 
 def print_debug_results(result: RetrievalResult) -> None:
@@ -38,8 +42,9 @@ def main() -> None:
         raise SystemExit("AIClient2API is not healthy. Run: python scripts/start_api.py")
 
     print("Reading memory assistant. Type /exit to quit.")
-    print("Use /debug on or /debug off to toggle retrieval details.")
+    print("Commands: /debug on, /debug off, /history, /clear")
     retriever = EnhancedRetriever()
+    conversation = ConversationSession()
     debug = False
 
     while True:
@@ -56,15 +61,27 @@ def main() -> None:
             debug = False
             print("Debug off")
             continue
+        if question == "/history":
+            print(render_history(conversation))
+            continue
+        if question == "/clear":
+            conversation = ConversationSession()
+            print("已清空本轮会话上下文。")
+            continue
 
-        retrieval_result = retriever.search(question, debug=debug)
+        retrieval_result = retriever.search(question, debug=debug, conversation=conversation)
         if debug:
             print_debug_results(retrieval_result)
         else:
             print_retrieval_summary(retrieval_result)
 
         try:
-            result = generate_answer(question, retrieval_result.chunks)
+            result = generate_answer(
+                question,
+                retrieval_result.chunks,
+                intent=retrieval_result.intent,
+                conversation=conversation,
+            )
         except RuntimeError as exc:
             print(f"Error: {exc}")
             continue
@@ -73,6 +90,7 @@ def main() -> None:
             print("\n引用来源：")
             for citation in result.citations:
                 print(citation)
+        conversation = update_conversation(conversation, question, retrieval_result, result)
 
 
 if __name__ == "__main__":

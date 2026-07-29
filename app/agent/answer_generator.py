@@ -3,9 +3,16 @@ from pathlib import Path
 import httpx
 from langchain_openai import ChatOpenAI
 
+from app.agent.answer_strategy import choose_answer_strategy
 from app.agent.citation_builder import build_citations, build_context
 from app.config import get_settings
-from app.models.schemas import AnswerWithCitations, RetrievedChunk
+from app.models.schemas import (
+    AnswerStrategy,
+    AnswerWithCitations,
+    ConversationSession,
+    IntentAnalysis,
+    RetrievedChunk,
+)
 
 
 PROMPT_PATH = Path("app/prompts/answer_with_citations.md")
@@ -15,17 +22,31 @@ def load_prompt() -> str:
     return PROMPT_PATH.read_text(encoding="utf-8")
 
 
-def generate_answer(question: str, retrieved: list[RetrievedChunk]) -> AnswerWithCitations:
+def generate_answer(
+    question: str,
+    retrieved: list[RetrievedChunk],
+    intent: IntentAnalysis | None = None,
+    conversation: ConversationSession | None = None,
+    strategy: AnswerStrategy | None = None,
+) -> AnswerWithCitations:
     if not retrieved:
         return AnswerWithCitations(answer="当前书库证据不足。", citations=[])
 
     settings = get_settings()
+    strategy = strategy or (choose_answer_strategy(intent) if intent else AnswerStrategy())
     context = build_context(retrieved)
     citations = build_citations(retrieved)
-    prompt = load_prompt().format(question=question, context=context)
+    prompt = load_prompt().format(
+        question=question,
+        context=context,
+        conversation_context=format_conversation_context(conversation),
+        min_chars=strategy.min_chars,
+        max_chars=strategy.max_chars,
+        strategy_instruction=strategy.instruction,
+    )
 
     llm = ChatOpenAI(
-        model=settings.CHAT_MODEL,
+        model=settings.ANSWER_MODEL,
         api_key=settings.OPENAI_API_KEY,
         base_url=settings.OPENAI_BASE_URL,
         http_client=httpx.Client(trust_env=False),
@@ -41,3 +62,17 @@ def generate_answer(question: str, retrieved: list[RetrievedChunk]) -> AnswerWit
             ) from exc
         raise
     return AnswerWithCitations(answer=str(response.content), citations=citations)
+
+
+def format_conversation_context(conversation: ConversationSession | None) -> str:
+    if not conversation or not conversation.turns:
+        return "无"
+    titles = "、".join(conversation.active_book_titles) or "无"
+    topics = "、".join(conversation.active_topics[:5]) or "无"
+    recent = []
+    for turn in conversation.turns[-3:]:
+        if turn.answer_summary:
+            recent.append(f"用户问：{turn.user_question}；上一答摘要：{turn.answer_summary}")
+        else:
+            recent.append(f"用户问：{turn.user_question}")
+    return f"当前书名：{titles}\n当前主题：{topics}\n最近对话：{' | '.join(recent)}"

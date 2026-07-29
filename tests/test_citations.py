@@ -29,3 +29,4 @@ def test_build_context_contains_text_and_number():
     context = build_context([make_retrieved_chunk()])
     assert "[1]" in context
     assert "This is the source text." in context
+    assert "chunk_id" not in context

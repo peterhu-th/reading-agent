@@ -9,6 +9,7 @@ def make_settings() -> Settings:
         OPENAI_BASE_URL="http://127.0.0.1:3000/v1",
         VECTOR_INITIAL_K=7,
         KEYWORD_INITIAL_K=8,
+        RERANK_CANDIDATE_K=11,
         RERANK_TOP_K=9,
         FINAL_TOP_K=10,
         CONTEXT_MAX_CHARS=2000,
@@ -40,3 +41,4 @@ def test_query_planner_builds_filters_for_specified_book():
     assert plan.queries
     assert plan.queries[0].metadata_filter["title"] == ["百年孤独"]
     assert plan.vector_initial_k == 7
+    assert plan.rerank_candidate_k == 11

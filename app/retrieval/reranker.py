@@ -1,4 +1,6 @@
-from app.models.schemas import PlannedQuery, RetrievedChunk
+from app.config import get_settings
+from app.models.schemas import PlannedQuery, RetrievedChunk, RerankDebugInfo
+from app.retrieval.cross_encoder_reranker import CrossEncoderReranker
 from app.retrieval.keyword_retriever import metadata_matches, tokenize
 
 
@@ -7,9 +9,34 @@ def rerank_chunks(
     planned_queries: list[PlannedQuery],
     top_k: int,
 ) -> list[RetrievedChunk]:
-    if not candidates:
-        return []
+    ranked, _ = rerank_chunks_with_debug(candidates, planned_queries, top_k)
+    return ranked
 
+
+def rerank_chunks_with_debug(
+    candidates: list[RetrievedChunk],
+    planned_queries: list[PlannedQuery],
+    top_k: int,
+) -> tuple[list[RetrievedChunk], RerankDebugInfo]:
+    if not candidates:
+        return [], RerankDebugInfo()
+
+    settings = get_settings()
+    lightweight = lightweight_rerank(candidates, planned_queries)
+    limited = lightweight[: settings.RERANK_CANDIDATE_K]
+    if settings.RERANK_BACKEND.strip().lower() in {"cross_encoder", "cross-encoder"}:
+        reranked, debug = CrossEncoderReranker().rerank(limited, planned_queries)
+        if debug.used_cross_encoder:
+            return reranked[:top_k], debug
+        return lightweight[:top_k], debug
+
+    return lightweight[:top_k], RerankDebugInfo(backend="lightweight")
+
+
+def lightweight_rerank(
+    candidates: list[RetrievedChunk],
+    planned_queries: list[PlannedQuery],
+) -> list[RetrievedChunk]:
     vector_values = [item.vector_score for item in candidates if item.vector_score is not None]
     keyword_values = [item.keyword_score for item in candidates if item.keyword_score is not None]
     max_keyword = max(keyword_values) if keyword_values else 0.0
@@ -51,7 +78,7 @@ def rerank_chunks(
         )
 
     reranked.sort(key=lambda item: item.rerank_score or 0.0, reverse=True)
-    return reranked[:top_k]
+    return reranked
 
 
 def normalize_vector_score(value: float | None, min_value: float, max_value: float) -> float:

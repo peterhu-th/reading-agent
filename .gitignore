@@ -51,6 +51,8 @@ models/
 *.jsonl.tmp
 retrieval_debug*.txt
 prompt_log*
+eval_results*.json
+summary_build*.log
 work/
 
 # OS files

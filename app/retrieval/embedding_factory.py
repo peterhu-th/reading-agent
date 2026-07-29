@@ -2,7 +2,6 @@ from langchain_core.embeddings import Embeddings
 
 from app.config import get_settings
 from app.retrieval.local_embeddings import LocalHashEmbeddings
-from app.retrieval.sentence_transformer_embeddings import SentenceTransformerEmbeddings
 
 
 def make_embeddings() -> Embeddings:
@@ -13,6 +12,8 @@ def make_embeddings() -> Embeddings:
         return LocalHashEmbeddings()
 
     if backend in {"sentence-transformers", "sentence_transformers"}:
+        from app.retrieval.sentence_transformer_embeddings import SentenceTransformerEmbeddings
+
         return SentenceTransformerEmbeddings(
             model_name=settings.EMBEDDING_MODEL,
             device=settings.EMBEDDING_DEVICE,

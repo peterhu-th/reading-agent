@@ -10,11 +10,10 @@ def build_context(retrieved: list[RetrievedChunk]) -> str:
             "\n".join(
                 [
                     f"[{index}]",
-                    f"Title: {chunk.title}",
-                    f"Author: {chunk.author or 'unknown'}",
-                    f"Chapter: {chunk.chapter_title or chunk.chapter_index}",
-                    f"chunk_id: {chunk.chunk_id}",
-                    f"Text: {chunk.text}",
+                    f"书名：{chunk.title}",
+                    f"作者：{chunk.author or 'unknown'}",
+                    f"章节：{chunk.chapter_title or chunk.chapter_index}",
+                    f"正文：{chunk.text}",
                 ]
             )
         )

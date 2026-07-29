@@ -3,6 +3,7 @@ from app.models.schemas import IntentAnalysis, PlannedQuery, RetrievalPlan
 
 
 SUMMARY_LABELS = {"summary", "comparison", "recommendation", "emotion", "scene"}
+SUMMARY_INDEX_LABELS = {"summary", "comparison", "detail"}
 
 
 def plan_retrieval(intent: IntentAnalysis, settings: Settings | None = None) -> RetrievalPlan:
@@ -18,15 +19,16 @@ def plan_retrieval(intent: IntentAnalysis, settings: Settings | None = None) -> 
     elif labels & {"emotion", "recommendation"}:
         final_top_k = max(final_top_k, 12)
 
-    queries = build_planned_queries(intent)
     return RetrievalPlan(
-        queries=queries,
+        queries=build_planned_queries(intent),
         vector_initial_k=settings.VECTOR_INITIAL_K,
         keyword_initial_k=settings.KEYWORD_INITIAL_K,
+        rerank_candidate_k=settings.RERANK_CANDIDATE_K,
         rerank_top_k=rerank_top_k,
         final_top_k=final_top_k,
         neighbor_window=neighbor_window,
         context_max_chars=settings.CONTEXT_MAX_CHARS,
+        use_summary_index=bool(labels & SUMMARY_INDEX_LABELS),
     )
 
 
@@ -37,7 +39,7 @@ def build_planned_queries(intent: IntentAnalysis) -> list[PlannedQuery]:
     if intent.authors:
         filters["author"] = intent.authors
 
-    base_terms = intent.topics + intent.emotions
+    base_terms = unique_strings(intent.topics + intent.emotions)
     queries: list[PlannedQuery] = [
         PlannedQuery(query=intent.question, metadata_filter=filters, purpose="original")
     ]
@@ -52,9 +54,10 @@ def build_planned_queries(intent: IntentAnalysis) -> list[PlannedQuery]:
         )
 
     if "summary" in intent.labels:
+        title_text = " ".join(intent.book_titles)
         queries.append(
             PlannedQuery(
-                query=f"{' '.join(intent.book_titles)} 主要内容 情节 主题".strip(),
+                query=f"{title_text} 主要内容 情节 主题 人物关系".strip(),
                 metadata_filter=filters,
                 purpose="summary",
             )
@@ -64,7 +67,7 @@ def build_planned_queries(intent: IntentAnalysis) -> list[PlannedQuery]:
         for title in intent.book_titles:
             queries.append(
                 PlannedQuery(
-                    query=f"{title} {' '.join(base_terms)}".strip(),
+                    query=f"{title} {' '.join(base_terms)} 主题 观念".strip(),
                     metadata_filter={"title": title},
                     purpose="comparison_target",
                 )
@@ -73,7 +76,7 @@ def build_planned_queries(intent: IntentAnalysis) -> list[PlannedQuery]:
     if "emotion" in intent.labels or "recommendation" in intent.labels:
         queries.append(
             PlannedQuery(
-                query=f"{' '.join(intent.emotions)} {' '.join(intent.topics)} 片段 主题".strip(),
+                query=f"{' '.join(intent.emotions)} {' '.join(intent.topics)} 片段 主题 处境".strip(),
                 metadata_filter=filters,
                 purpose="recommendation",
             )
@@ -92,3 +95,11 @@ def build_planned_queries(intent: IntentAnalysis) -> list[PlannedQuery]:
         deduped.append(query.model_copy(update={"query": normalized}))
 
     return deduped[:5]
+
+
+def unique_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result

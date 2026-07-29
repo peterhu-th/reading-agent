@@ -55,7 +55,13 @@ def test_merge_candidate_preserves_best_scores():
     assert item.matched_queries == ["q1", "孤独", "q2"]
 
 
-def test_rerank_prefers_metadata_and_keyword_overlap():
+def test_rerank_prefers_metadata_and_keyword_overlap(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:3000/v1")
+    monkeypatch.setenv("RERANK_BACKEND", "lightweight")
+    get_settings.cache_clear()
     query = PlannedQuery(query="荒原狼 孤独", metadata_filter={"title": "荒原狼"})
     candidates = [
         RetrievedChunk(chunk=make_chunk(0), vector_score=0.3, keyword_score=2.0),
@@ -66,6 +72,7 @@ def test_rerank_prefers_metadata_and_keyword_overlap():
 
     assert ranked[0].chunk.chunk_id == "book:0:0"
     assert ranked[0].rerank_score is not None
+    get_settings.cache_clear()
 
 
 def test_expand_neighbors_stays_in_same_book_and_chapter(monkeypatch):
