@@ -65,9 +65,10 @@ def build_planned_queries(intent: IntentAnalysis) -> list[PlannedQuery]:
 
     if "comparison" in intent.labels:
         for title in intent.book_titles:
+            comparison_terms = " ".join(base_terms) or intent.question
             queries.append(
                 PlannedQuery(
-                    query=f"{title} {' '.join(base_terms)} 主题 观念".strip(),
+                    query=f"{title} {comparison_terms} 主题 观念 差异".strip(),
                     metadata_filter={"title": title},
                     purpose="comparison_target",
                 )
@@ -94,7 +95,7 @@ def build_planned_queries(intent: IntentAnalysis) -> list[PlannedQuery]:
         seen.add(key)
         deduped.append(query.model_copy(update={"query": normalized}))
 
-    return deduped[:5]
+    return deduped[:8]
 
 
 def unique_strings(values: list[str]) -> list[str]:

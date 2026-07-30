@@ -15,11 +15,18 @@ from app.models.schemas import (
 )
 
 
-PROMPT_PATH = Path("app/prompts/answer_with_citations.md")
+PROMPT_BY_STRATEGY = {
+    "summarize": Path("app/prompts/answer_summary.md"),
+    "compare": Path("app/prompts/answer_compare.md"),
+    "detail": Path("app/prompts/answer_detail.md"),
+    "recommend": Path("app/prompts/answer_recommend.md"),
+    "explain": Path("app/prompts/answer_with_citations.md"),
+}
 
 
-def load_prompt() -> str:
-    return PROMPT_PATH.read_text(encoding="utf-8")
+def load_prompt(strategy_name: str) -> str:
+    path = PROMPT_BY_STRATEGY.get(strategy_name, PROMPT_BY_STRATEGY["explain"])
+    return path.read_text(encoding="utf-8")
 
 
 def generate_answer(
@@ -36,7 +43,7 @@ def generate_answer(
     strategy = strategy or (choose_answer_strategy(intent) if intent else AnswerStrategy())
     context = build_context(retrieved)
     citations = build_citations(retrieved)
-    prompt = load_prompt().format(
+    prompt = load_prompt(strategy.name).format(
         question=question,
         context=context,
         conversation_context=format_conversation_context(conversation),

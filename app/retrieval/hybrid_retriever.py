@@ -70,6 +70,7 @@ class EnhancedRetriever:
         summary_records = self.collect_summary_records(plan) if plan.use_summary_index else []
         candidates = self.merge_summary_sources(candidates, summary_records, plan.queries)
         reranked, rerank_debug = rerank_chunks_with_debug(candidates, plan.queries, plan.rerank_top_k)
+        reranked = balance_comparison_results(reranked, intent, plan.rerank_top_k)
         expanded = self.expand_neighbors(reranked, plan.neighbor_window)
         final = self.apply_context_budget(expanded, plan)
 
@@ -162,7 +163,8 @@ class EnhancedRetriever:
                     merged[chunk_id] = existing.model_copy(
                         update={
                             "rerank_score": max(existing.rerank_score or 0.0, score),
-                            "debug_reason": existing.debug_reason or f"summary_source={record.summary_id}",
+                            "debug_reason": existing.debug_reason
+                            or f"summary_source={record.summary_id}",
                         }
                     )
         return list(merged.values())
@@ -272,6 +274,50 @@ def unique_strings(values: list[str]) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def balance_comparison_results(
+    reranked: list[RetrievedChunk],
+    intent: IntentAnalysis,
+    top_k: int,
+) -> list[RetrievedChunk]:
+    if "comparison" not in intent.labels or len(intent.book_titles) < 2:
+        return reranked
+
+    targets = intent.book_titles
+    quota = max(2, min(5, top_k // max(len(targets), 1)))
+    selected: list[RetrievedChunk] = []
+    seen: set[str] = set()
+
+    for title in targets:
+        for item in reranked:
+            if item.chunk.chunk_id in seen:
+                continue
+            if title in item.chunk.title:
+                selected.append(item)
+                seen.add(item.chunk.chunk_id)
+                break
+
+    for title in targets:
+        count = sum(1 for item in selected if title in item.chunk.title)
+        for item in reranked:
+            if item.chunk.chunk_id in seen:
+                continue
+            if title in item.chunk.title:
+                selected.append(item)
+                seen.add(item.chunk.chunk_id)
+                count += 1
+            if count >= quota:
+                break
+
+    for item in reranked:
+        if item.chunk.chunk_id not in seen:
+            selected.append(item)
+            seen.add(item.chunk.chunk_id)
+        if len(selected) >= top_k:
+            break
+
+    return selected
 
 
 def build_debug_lines(

@@ -21,6 +21,7 @@ class TextChunk(BaseModel):
     book_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     author: str = ""
+    book_type: str = "fiction"
     chapter_index: int = Field(ge=0)
     chapter_title: str = ""
     chunk_index: int = Field(ge=0)

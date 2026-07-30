@@ -47,6 +47,7 @@ def chunk_content_hash(chunk: TextChunk) -> str:
         "book_id": chunk.book_id,
         "title": chunk.title,
         "author": chunk.author,
+        "book_type": chunk.book_type,
         "chapter_index": chunk.chapter_index,
         "chapter_title": chunk.chapter_title,
         "chunk_index": chunk.chunk_index,
