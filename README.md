@@ -1,6 +1,6 @@
-# Reading Memory Agent
+# Reading Agent
 
-Reading Memory Agent 是一个面向个人中文 EPUB 书库的本地 RAG 阅读助理。项目把本地书籍解析为可检索的文本片段，使用本地 embedding、关键词检索、cross-encoder reranker、摘要索引和多轮会话，为大模型提供更合适的上下文，再由对话模型生成带引用的回答。
+Reading Agent 是一个面向个人中文 EPUB 书库的本地 RAG 阅读助理。项目把本地书籍解析为可检索的文本片段，使用本地 embedding、关键词检索、cross-encoder reranker、摘要索引和多轮会话，为大模型提供更合适的上下文，再由对话模型生成带引用的回答。
 
 当前版本优先服务中文书库，默认通过 AIClient2API 接入 ChatGPT 兼容接口；书籍正文、向量索引、摘要索引和本地模型都保存在本机。
 
@@ -243,7 +243,7 @@ npm.cmd run build
 cd ..
 ```
 
-React 依赖安装在 `frontend/node_modules`，不需要全局安装 React。当前 PowerShell 环境如果限制执行 `npm.ps1`，请使用 `npm.cmd`。
+React 依赖安装在 `frontend/node_modules`。当前 PowerShell 环境如果限制执行 `npm.ps1`，请使用 `npm.cmd`。
 
 启动 FastAPI 和已经构建的前端：
 
