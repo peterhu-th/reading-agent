@@ -20,9 +20,9 @@ def make_retrieved_chunk() -> RetrievedChunk:
 
 def test_build_citations_contains_source_metadata():
     citations = build_citations([make_retrieved_chunk()])
-    assert "Test Book" in citations[0]
-    assert "段落 0-1" in citations[0]
-    assert "book1:0:0" not in citations[0]
+    assert citations[0].title == "Test Book"
+    assert citations[0].paragraph_range == "0-1"
+    assert citations[0].source_id != "book1:0:0"
 
 
 def test_build_context_contains_text_and_number():

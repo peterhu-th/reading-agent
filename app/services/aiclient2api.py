@@ -32,6 +32,21 @@ def is_api_healthy(health_url: str | None = None, timeout: float = 2.0) -> bool:
         return False
 
 
+def is_provider_ready(timeout: float = 4.0) -> bool:
+    """Check whether AIClient2API has a healthy provider, not just a live process."""
+
+    settings = get_settings()
+    url = f"{settings.OPENAI_BASE_URL.rstrip('/')}/models"
+    headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}"}
+    try:
+        with httpx.Client(trust_env=False, timeout=timeout) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+            return True
+    except Exception:
+        return False
+
+
 def start_aiclient2api() -> None:
     """Start AIClient2API in the background via npm start."""
     settings = get_settings()

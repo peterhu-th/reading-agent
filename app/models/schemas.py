@@ -1,4 +1,11 @@
+from datetime import datetime, timezone
+from uuid import uuid4
+
 from pydantic import BaseModel, Field
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class BookParagraph(BaseModel):
@@ -31,7 +38,7 @@ class TextChunk(BaseModel):
 
 
 class RetrievedChunk(BaseModel):
-    """A chunk returned by retrieval, optionally with a similarity score."""
+    """A chunk returned by retrieval, with optional source scores."""
 
     chunk: TextChunk
     score: float | None = None
@@ -43,6 +50,16 @@ class RetrievedChunk(BaseModel):
     debug_reason: str = ""
 
 
+class EvidenceRequirement(BaseModel):
+    """One independently verifiable evidence need for a question."""
+
+    requirement_id: str = Field(default_factory=lambda: uuid4().hex[:12])
+    description: str = Field(min_length=1)
+    query: str = Field(min_length=1)
+    target_books: list[str] = Field(default_factory=list)
+    purpose: str = "evidence"
+
+
 class IntentAnalysis(BaseModel):
     """Structured interpretation of a user question before retrieval."""
 
@@ -52,6 +69,7 @@ class IntentAnalysis(BaseModel):
     authors: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
     emotions: list[str] = Field(default_factory=list)
+    evidence_requirements: list[EvidenceRequirement] = Field(default_factory=list)
     question: str = Field(min_length=1)
     complexity: str = "normal"
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -80,7 +98,7 @@ class RetrievalPlan(BaseModel):
 
 
 class RetrievalDebugInfo(BaseModel):
-    """Human-readable retrieval diagnostics for CLI debug mode."""
+    """Human-readable retrieval diagnostics."""
 
     candidate_count: int = 0
     summary_candidate_count: int = 0
@@ -92,7 +110,7 @@ class RetrievalDebugInfo(BaseModel):
 
 
 class RetrievalResult(BaseModel):
-    """Final retrieval result plus planning/debug data."""
+    """Final retrieval result plus planning and debug data."""
 
     chunks: list[RetrievedChunk] = Field(default_factory=list)
     intent: IntentAnalysis
@@ -100,30 +118,101 @@ class RetrievalResult(BaseModel):
     debug: RetrievalDebugInfo = Field(default_factory=RetrievalDebugInfo)
 
 
+class EvidenceAssessment(BaseModel):
+    """Coverage check produced after one retrieval round."""
+
+    sufficient: bool = False
+    covered_requirement_ids: list[str] = Field(default_factory=list)
+    missing_aspects: list[str] = Field(default_factory=list)
+    supplemental_queries: list[PlannedQuery] = Field(default_factory=list)
+    reason: str = ""
+    used_llm: bool = False
+
+
+class RetrievalRound(BaseModel):
+    """One initial or supplemental retrieval round."""
+
+    round_index: int = Field(ge=0)
+    queries: list[PlannedQuery] = Field(default_factory=list)
+    candidate_count: int = 0
+    new_chunk_count: int = 0
+    assessment: EvidenceAssessment | None = None
+    stop_reason: str = ""
+
+
+class IterativeRetrievalResult(BaseModel):
+    """Evidence returned after the retrieve-check-supplement loop."""
+
+    chunks: list[RetrievedChunk] = Field(default_factory=list)
+    intent: IntentAnalysis
+    plan: RetrievalPlan
+    assessment: EvidenceAssessment
+    rounds: list[RetrievalRound] = Field(default_factory=list)
+    debug: RetrievalDebugInfo = Field(default_factory=RetrievalDebugInfo)
+
+
+class Citation(BaseModel):
+    """Public, structured citation without exposing an internal chunk id."""
+
+    source_id: str = Field(min_length=1)
+    display_index: int = Field(ge=1)
+    title: str = Field(min_length=1)
+    author: str = ""
+    chapter_title: str = ""
+    paragraph_range: str = ""
+    excerpt: str = ""
+
+
 class AnswerWithCitations(BaseModel):
-    """The final generated answer plus program-built citation strings."""
+    """The final generated answer plus structured source citations."""
 
     answer: str = Field(min_length=1)
-    citations: list[str] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
 
 
 class ConversationTurn(BaseModel):
-    """One completed user-assistant exchange kept in the local CLI session."""
+    """One completed user-assistant exchange kept in a runtime session."""
 
     user_question: str = Field(min_length=1)
+    resolved_question: str = ""
+    assistant_answer: str = ""
     answer_summary: str = ""
+    citations: list[Citation] = Field(default_factory=list)
     book_titles: list[str] = Field(default_factory=list)
     authors: list[str] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
     topics: list[str] = Field(default_factory=list)
+    missing_aspects: list[str] = Field(default_factory=list)
 
 
 class ConversationSession(BaseModel):
-    """Short-lived conversation state for follow-up questions."""
+    """In-memory session state used by CLI and Web clients."""
 
+    session_id: str = Field(default_factory=lambda: uuid4().hex)
+    title: str = "新对话"
     turns: list[ConversationTurn] = Field(default_factory=list)
     active_book_titles: list[str] = Field(default_factory=list)
     active_authors: list[str] = Field(default_factory=list)
+    active_entities: list[str] = Field(default_factory=list)
     active_topics: list[str] = Field(default_factory=list)
+    explicit_book_titles: list[str] = Field(default_factory=list)
+    rolling_summary: str = ""
+    last_resolved_question: str = ""
+    unresolved_references: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class ResolvedQuestion(BaseModel):
+    """A follow-up question rewritten into a standalone retrieval query."""
+
+    original_question: str = Field(min_length=1)
+    standalone_question: str = Field(min_length=1)
+    inherited_book_titles: list[str] = Field(default_factory=list)
+    resolved_entities: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    clarification_needed: bool = False
+    clarification_message: str = ""
 
 
 class AnswerStrategy(BaseModel):
@@ -158,3 +247,21 @@ class RerankDebugInfo(BaseModel):
     backend: str = "lightweight"
     used_cross_encoder: bool = False
     fallback_reason: str = ""
+
+
+class BookSummary(BaseModel):
+    """Public book metadata derived from processed chunks."""
+
+    book_id: str
+    title: str
+    author: str = ""
+    book_type: str = "fiction"
+    chapter_count: int = 0
+    chunk_count: int = 0
+
+
+class ChatRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    selected_books: list[str] = Field(default_factory=list)
+    debug: bool = False

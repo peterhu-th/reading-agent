@@ -232,6 +232,36 @@ python scripts/start_api.py
 python scripts/run_cli.py
 ```
 
+## 运行 Web 前端
+
+首次安装或前端依赖变化后，在项目根目录运行：
+
+```powershell
+cd frontend
+npm.cmd install
+npm.cmd run build
+cd ..
+```
+
+React 依赖安装在 `frontend/node_modules`，不需要全局安装 React。当前 PowerShell 环境如果限制执行 `npm.ps1`，请使用 `npm.cmd`。
+
+启动 FastAPI 和已经构建的前端：
+
+```powershell
+python scripts/run_web.py
+```
+
+浏览器访问 `http://127.0.0.1:8000`。Web 界面支持运行期多会话、书库筛选、流式回答、检索阶段反馈和引用原文展开。会话保存在后端内存中，刷新页面可以恢复，重启后端后会话会清空。
+
+前端开发模式：
+
+```powershell
+cd frontend
+npm.cmd run dev
+```
+
+Vite 开发服务器使用 `http://127.0.0.1:5173`，并把 `/api` 转发到 `http://127.0.0.1:8000`。
+
 CLI 命令：
 
 ```text
