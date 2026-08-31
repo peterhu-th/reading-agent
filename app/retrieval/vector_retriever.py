@@ -7,6 +7,9 @@ from app.models.schemas import RetrievedChunk, TextChunk
 from app.retrieval.embedding_factory import make_embeddings
 
 
+MetadataValue = str | int | list[str] | list[int]
+
+
 class VectorRetriever:
     """Retrieve chunks from the persisted Chroma index."""
 
@@ -22,7 +25,7 @@ class VectorRetriever:
         self,
         query: str,
         top_k: int = 5,
-        metadata_filter: dict[str, str | list[str]] | None = None,
+        metadata_filter: dict[str, MetadataValue] | None = None,
     ) -> list[RetrievedChunk]:
         query = query.strip()
         if not query:
@@ -52,7 +55,7 @@ class VectorRetriever:
         return retrieved
 
 
-def chroma_where(metadata_filter: dict[str, str | list[str]] | None) -> dict[str, Any] | None:
+def chroma_where(metadata_filter: dict[str, MetadataValue] | None) -> dict[str, Any] | None:
     if not metadata_filter:
         return None
 

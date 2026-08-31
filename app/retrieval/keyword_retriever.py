@@ -7,6 +7,7 @@ from rank_bm25 import BM25Okapi
 
 from app.config import get_settings
 from app.models.schemas import RetrievedChunk, TextChunk
+from app.retrieval.vector_retriever import MetadataValue
 
 
 WORD_PATTERN = re.compile(r"[A-Za-z0-9]+")
@@ -25,14 +26,19 @@ def tokenize(text: str) -> list[str]:
     return [token for token in tokens if token.strip()]
 
 
-def metadata_matches(chunk: TextChunk, metadata_filter: dict[str, str | list[str]] | None) -> bool:
+def metadata_matches(chunk: TextChunk, metadata_filter: dict[str, MetadataValue] | None) -> bool:
     if not metadata_filter:
         return True
 
     for key, expected in metadata_filter.items():
-        actual = str(getattr(chunk, key, "") or "")
+        raw_actual = getattr(chunk, key, "")
         values = expected if isinstance(expected, list) else [expected]
-        if values and not any(value and value in actual for value in values):
+        if key in {"chapter_index", "chunk_index"}:
+            if values and raw_actual not in values:
+                return False
+            continue
+        actual = str(raw_actual or "")
+        if values and not any(str(value) and str(value) in actual for value in values):
             return False
     return True
 
@@ -72,7 +78,7 @@ class KeywordRetriever:
         self,
         query: str,
         top_k: int = 5,
-        metadata_filter: dict[str, str | list[str]] | None = None,
+        metadata_filter: dict[str, MetadataValue] | None = None,
     ) -> list[RetrievedChunk]:
         query_tokens = tokenize(query)
         if not query_tokens or not self.bm25:

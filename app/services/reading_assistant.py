@@ -12,6 +12,7 @@ from app.memory.session_store import SessionStore
 from app.models.schemas import AnswerWithCitations, BookSummary, ConversationSession, IterativeRetrievalResult, ResolvedQuestion, TextChunk
 from app.retrieval.hybrid_retriever import EnhancedRetriever
 from app.retrieval.iterative_retriever import IterativeRetriever, StatusCallback
+from app.retrieval.vector_retriever import MetadataValue
 
 
 @dataclass
@@ -53,15 +54,37 @@ class ReadingAssistantService:
     def create_session(self) -> ConversationSession:
         return self.store.create()
 
-    def prepare_turn(self, session_id: str, question: str, selected_books: list[str] | None = None, debug: bool = False, status_callback: StatusCallback | None = None) -> PreparedTurn:
+    def prepare_turn(
+        self,
+        session_id: str,
+        question: str,
+        selected_books: list[str] | None = None,
+        debug: bool = False,
+        status_callback: StatusCallback | None = None,
+        scope: str = "library",
+        book_id: str = "",
+        book_title: str = "",
+        chapter_index: int | None = None,
+        selected_text: str = "",
+        selected_paragraphs: list[int] | None = None,
+    ) -> PreparedTurn:
         session = self.store.get(session_id)
-        selected = list(dict.fromkeys(selected_books or []))
+        selected = list(dict.fromkeys(selected_books or ([book_title] if book_title and scope != "library" else [])))
         session = session.model_copy(update={"explicit_book_titles": selected})
         self.store.save(session)
-        resolved = resolve_question(question, session, selected)
+        retrieval_question = question
+        if selected_text.strip():
+            retrieval_question = f"用户选中的原文：{selected_text.strip()}\n用户问题：{question}"
+        resolved = resolve_question(retrieval_question, session, selected)
         if resolved.clarification_needed:
             return PreparedTurn(session=session, resolved=resolved)
-        retrieval = self.iterative.search(resolved.standalone_question, session, debug, status_callback)
+        metadata_filter: dict[str, MetadataValue] = {}
+        if scope in {"book", "chapter"} and book_id:
+            metadata_filter["book_id"] = book_id
+        if scope == "chapter" and chapter_index is not None:
+            metadata_filter["chapter_index"] = chapter_index
+        retrieval = self.iterative.search(resolved.standalone_question, session, debug, status_callback, metadata_filter or None)
+        resolved = resolved.model_copy(update={"original_question": question})
         return PreparedTurn(session=session, resolved=resolved, retrieval=retrieval)
 
     def generate(self, prepared: PreparedTurn) -> AnswerWithCitations:

@@ -82,7 +82,11 @@ def rebuild_index_with_stats(
 
     ids = [chunk.chunk_id for chunk in chunks]
     documents = [chunk_to_document(chunk) for chunk in chunks]
-    vectorstore = make_vectorstore(settings.CHROMA_COLLECTION, settings.VECTOR_DB_PATH)
+    vectorstore = make_vectorstore(
+        settings.CHROMA_COLLECTION,
+        settings.VECTOR_DB_PATH,
+        with_embeddings=False,
+    )
 
     existing_hashes = load_existing_hashes(vectorstore, progress)
     current_ids = set(ids)
@@ -105,22 +109,26 @@ def rebuild_index_with_stats(
         f"Chunks: total={len(documents)}, changed={len(changed_documents)}, skipped={skipped}.",
     )
 
-    try:
-        add_documents_in_batches(vectorstore, changed_documents, changed_ids, progress)
-    except Exception as exc:
-        if "expecting embedding with dimension" not in str(exc):
-            raise
-        emit(progress, "Embedding dimension changed; resetting Chroma collection...")
-        reset_collection(vectorstore, settings.CHROMA_COLLECTION)
+    if changed_documents:
         vectorstore = make_vectorstore(settings.CHROMA_COLLECTION, settings.VECTOR_DB_PATH)
-        add_documents_in_batches(vectorstore, documents, ids, progress)
-        return IndexBuildStats(
-            total_chunks=len(documents),
-            indexed_chunks=len(documents),
-            skipped_chunks=0,
-            deleted_chunks=len(stale_ids),
-            reset_collection=True,
-        )
+        try:
+            add_documents_in_batches(vectorstore, changed_documents, changed_ids, progress)
+        except Exception as exc:
+            if "expecting embedding with dimension" not in str(exc):
+                raise
+            emit(progress, "Embedding dimension changed; resetting Chroma collection...")
+            reset_collection(vectorstore, settings.CHROMA_COLLECTION)
+            vectorstore = make_vectorstore(settings.CHROMA_COLLECTION, settings.VECTOR_DB_PATH)
+            add_documents_in_batches(vectorstore, documents, ids, progress)
+            return IndexBuildStats(
+                total_chunks=len(documents),
+                indexed_chunks=len(documents),
+                skipped_chunks=0,
+                deleted_chunks=len(stale_ids),
+                reset_collection=True,
+            )
+    else:
+        emit(progress, "No changed chunks to index.")
 
     return IndexBuildStats(
         total_chunks=len(documents),
@@ -130,10 +138,15 @@ def rebuild_index_with_stats(
     )
 
 
-def make_vectorstore(collection_name: str, persist_directory: str) -> Chroma:
+def make_vectorstore(
+    collection_name: str,
+    persist_directory: str,
+    *,
+    with_embeddings: bool = True,
+) -> Chroma:
     return Chroma(
         collection_name=collection_name,
-        embedding_function=make_embeddings(),
+        embedding_function=make_embeddings() if with_embeddings else None,
         persist_directory=persist_directory,
     )
 

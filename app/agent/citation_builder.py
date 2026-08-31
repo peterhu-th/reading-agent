@@ -1,6 +1,6 @@
 import hashlib
 
-from app.models.schemas import Citation, RetrievedChunk
+from app.models.schemas import Citation, ReaderLocation, RetrievedChunk
 
 
 def source_id_for_chunk(chunk_id: str) -> str:
@@ -48,6 +48,12 @@ def build_citations(retrieved: list[RetrievedChunk]) -> list[Citation]:
                 chapter_title=chapter,
                 paragraph_range=f"{chunk.start_paragraph_index}-{chunk.end_paragraph_index}",
                 excerpt=excerpt,
+                reader_location=ReaderLocation(
+                    book_id=chunk.book_id,
+                    chapter_index=chunk.chapter_index,
+                    start_paragraph_index=chunk.start_paragraph_index,
+                    end_paragraph_index=chunk.end_paragraph_index,
+                ),
             )
         )
     return citations

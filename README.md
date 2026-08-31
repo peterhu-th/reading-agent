@@ -25,6 +25,9 @@ Reading Agent 是一个面向个人中文 EPUB 书库的本地 RAG 阅读助理�
 - 摘要索引：离线生成章节摘要和全书摘要，用于总结、比较、人物关系等全局问题。
 - 多轮会话：CLI 内维护短期会话状态，支持 `/history` 和 `/clear`。
 - 按问题类型选择 prompt：总结、比较、细节、情绪推荐使用不同回答模板。
+- Web 阅读器：章节目录、正文分页、阅读进度、字体/行距/版心/主题设置和章内搜索。
+- 侧边阅读助理：可隐藏、可调宽度，支持当前书、当前章、全书库和选中文字四种上下文。
+- 引用回读：回答引用可以直接定位到书籍章节和原文段落。
 
 ## 项目结构
 
@@ -37,13 +40,18 @@ reading-memory-agent/
 │  ├─ models/                # Pydantic 数据结构
 │  ├─ prompts/               # 不同问题类型的回答 prompt
 │  ├─ retrieval/             # 向量检索、BM25、混合检索、rerank、摘要检索
-│  └─ services/              # AIClient2API 启动和健康检查
+│  ├─ services/              # 阅读服务、RAG 服务和模型服务健康检查
+│  └─ web/                   # FastAPI 接口与前端静态文件托管
+├─ frontend/                 # React + TypeScript + Vite 阅读器
 ├─ scripts/
 │  ├─ ingest_books.py        # EPUB -> books.jsonl / chunks.jsonl
+│  ├─ build_reader_library.py # EPUB -> 无损 reader.jsonl
 │  ├─ rebuild_index.py       # 重建或增量更新 chunk 向量索引
 │  ├─ build_summaries.py     # 离线生成或增量更新摘要
 │  ├─ rebuild_summary_index.py
 │  ├─ run_cli.py             # 启动命令行阅读助理
+│  ├─ run_web.py             # 只启动 Web 阅读器
+│  ├─ run_all.py             # 启动模型网关后再启动阅读器
 │  ├─ start_api.py           # 检查并启动 AIClient2API
 │  ├─ check_models.py        # 检查本地模型目录
 │  ├─ inspect_chunking.py    # 抽查 chunking 质量
@@ -203,6 +211,7 @@ conda activate reading-agent
 Copy-Item .env.example .env
 python scripts/check_models.py
 python scripts/ingest_books.py
+python scripts/build_reader_library.py
 python scripts/rebuild_index.py
 python scripts/build_summaries.py
 python scripts/rebuild_summary_index.py
@@ -213,6 +222,7 @@ python scripts/evaluate_retrieval.py
 
 - `check_models.py`：确认本地 embedding 和 reranker 模型存在。
 - `ingest_books.py`：解析 EPUB，生成 `books.jsonl` 和 `chunks.jsonl`。
+- `build_reader_library.py`：按 EPUB 自带目录生成无损阅读数据，保留短诗行、篇名、注释等全部可读文本。
 - `rebuild_index.py`：构建 Chroma chunk 向量索引；会跳过内容哈希一致的 chunk。
 - `build_summaries.py`：生成章节摘要和全书摘要；相同 source hash 会跳过。
 - `rebuild_summary_index.py`：构建摘要向量索引。
@@ -245,13 +255,33 @@ cd ..
 
 React 依赖安装在 `frontend/node_modules`。当前 PowerShell 环境如果限制执行 `npm.ps1`，请使用 `npm.cmd`。
 
-启动 FastAPI 和已经构建的前端：
+只启动 FastAPI 和已经构建的阅读器：
 
 ```powershell
 python scripts/run_web.py
 ```
 
-浏览器访问 `http://127.0.0.1:8000`。Web 界面支持运行期多会话、书库筛选、流式回答、检索阶段反馈和引用原文展开。会话保存在后端内存中，刷新页面可以恢复，重启后端后会话会清空。
+`run_web.py` 会在服务就绪后自动打开 `http://127.0.0.1:8000`，但不会启动 Client2API。即使模型节点不可用，阅读器、目录、搜索和阅读进度仍可使用，聊天区会显示模型服务未就绪。
+
+需要同时尝试启动 Client2API 和 Web 阅读器时使用：
+
+```powershell
+python scripts/run_all.py
+```
+
+也可以在另一个终端先运行 `python scripts/start_api.py`，再运行 `python scripts/run_web.py`。浏览器访问 `http://127.0.0.1:8000`。
+
+Web 首屏是阅读器：左侧书库/目录可隐藏，中间显示完整正文，右侧聊天可隐藏并可调宽度。正文始终可以像文字处理器一样直接选中、输入和删除；跨段选择后删除会作为一次批量操作记录。选中文字会弹出工具条，可添加四色高亮和批注，也可以直接要求 AI 解释或分析选文。目录中的删除按钮可以整章删除，章节删除同样进入撤销历史，并在保存时持久化。
+
+顶部的“撤销”“保存”“更新数据库”是三个独立操作：
+
+- “撤销”覆盖上次成功保存之后的全部正文、章节名称和批注操作，刷新浏览器不会清空；保存成功或重启服务时清空。
+- “保存”先提交当前输入，再把修改直接写回原 EPUB，同时更新阅读器缓存和批注文件；保存成功后以当前文件为新基线并清空此前撤销历史。
+- “更新数据库”运行完整的数据更新流程，不会自动保存当前编辑。存在未保存修改时，界面会明确提示本次更新不包含这些内容；任务完成后重启 Web 服务即可载入新书目。
+
+阅读位置和显示偏好保存在浏览器本地，会话保存在后端内存中，后端重启后会话清空。回答引用可以跳回对应章节。
+
+新增、替换 EPUB 后，可运行 `python scripts/update_database.py` 完整更新检索库、摘要库和阅读器书库；脚本会自动调用 `ingest_books.py` 与 `build_reader_library.py`。前者生成用于 RAG 的清洗数据，后者生成用于阅读器的完整文本；二者刻意分离，避免检索清洗误删诗行或篇名。
 
 前端开发模式：
 
@@ -321,6 +351,9 @@ python -m pytest -q
 - 相邻 chunk 扩展
 - 摘要缓存和摘要索引
 - 多轮会话状态
+- 阅读器正文过滤、章节分页和段落定位
+- Web API 不泄露 EPUB 本地路径
+- 前端 SSE 解析、状态反馈和生产构建
 
 ## 隐私和开源注意事项
 

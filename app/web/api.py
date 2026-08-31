@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event
 
@@ -12,15 +14,33 @@ from app.agent.answer_generator import stream_answer
 from app.agent.citation_builder import build_citations
 from app.config import get_settings
 from app.memory.session_store import SessionBusyError, SessionNotFoundError
-from app.models.schemas import AnswerWithCitations, ChatRequest
+from app.models.schemas import AnnotationCreateRequest, AnswerWithCitations, ChapterRenameRequest, ChatRequest, ReaderOperationRequest
 from app.services.aiclient2api import is_api_healthy, is_provider_ready
+from app.services.database_update import DatabaseUpdateBusyError, DatabaseUpdateService
+from app.services.editor_session import EditorSessionService
+from app.services.epub_editor import EpubEditError
+from app.services.reader import ReaderNotFoundError, ReaderService
 from app.services.reading_assistant import ReadingAssistantService
 
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = ROOT / "frontend" / "dist"
+LOGGER = logging.getLogger(__name__)
 service = ReadingAssistantService()
-app = FastAPI(title="Reading Memory Agent", version="0.2.0")
+reader = ReaderService()
+editor = EditorSessionService(reader)
+database_update = DatabaseUpdateService(ROOT)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    reader.reload()
+    editor.reset()
+    reader.books
+    yield
+
+
+app = FastAPI(title="Reading Memory Agent", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
@@ -35,6 +55,8 @@ def health() -> dict:
     settings = get_settings()
     return {
         "status": "ok",
+        "web_api_version": 4,
+        "editor_capabilities": ["direct_edit", "annotations", "chapter_delete", "chapter_rename"],
         "answer_api_healthy": is_api_healthy(),
         "answer_provider_ready": is_provider_ready(),
         "chunk_index_exists": Path(settings.VECTOR_DB_PATH).exists(),
@@ -46,7 +68,141 @@ def health() -> dict:
 
 @app.get("/api/books")
 def books() -> list[dict]:
-    return [item.model_dump(mode="json") for item in service.list_books()]
+    return [item.model_dump(mode="json") for item in reader.books]
+
+
+@app.get("/api/reader/books")
+def reader_books() -> list[dict]:
+    return [item.model_dump(mode="json") for item in reader.books]
+
+
+@app.get("/api/reader/books/{book_id}")
+def reader_book(book_id: str) -> dict:
+    try:
+        return reader.get_book(book_id).model_dump(mode="json")
+    except ReaderNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="书籍不存在。") from exc
+
+
+@app.get("/api/reader/books/{book_id}/chapters")
+def reader_chapters(book_id: str) -> list[dict]:
+    try:
+        return [item.model_dump(mode="json") for item in reader.list_chapters(book_id)]
+    except ReaderNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="书籍不存在。") from exc
+
+
+@app.get("/api/reader/books/{book_id}/chapters/{chapter_index}")
+def reader_chapter(book_id: str, chapter_index: int, offset: int = 0, limit: int = 80, focus_paragraph: int | None = None) -> dict:
+    if offset < 0 or limit < 1 or limit > 200:
+        raise HTTPException(status_code=422, detail="分页参数无效。")
+    try:
+        return reader.get_chapter(book_id, chapter_index, offset, limit, focus_paragraph).model_dump(mode="json")
+    except ReaderNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="书籍或章节不存在。") from exc
+
+
+@app.get("/api/reader/books/{book_id}/search")
+def reader_search(book_id: str, q: str, chapter_index: int | None = None, limit: int = 30) -> list[dict]:
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="搜索数量无效。")
+    try:
+        return [item.model_dump(mode="json") for item in reader.search(book_id, q, chapter_index, limit)]
+    except ReaderNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="书籍不存在。") from exc
+
+
+@app.get("/api/editor/state")
+def editor_state() -> dict:
+    state = editor.state().model_dump(mode="json")
+    update = database_update.state()
+    state.update(
+        {
+            "database_updating": update["running"],
+            "database_status": update["status"],
+            "database_message": update["message"],
+        }
+    )
+    return state
+
+
+@app.post("/api/editor/operations")
+def editor_operation(payload: ReaderOperationRequest) -> dict:
+    try:
+        return editor.apply_operation(payload).model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="编辑段落不存在，请刷新阅读数据后重试。") from exc
+
+
+@app.post("/api/editor/annotations", status_code=201)
+def create_annotation(payload: AnnotationCreateRequest) -> dict:
+    try:
+        annotation, state = editor.add_annotation(payload)
+        return {
+            "annotation": annotation.model_dump(mode="json"),
+            "state": state.model_dump(mode="json"),
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="批注选区已经失效，请重新选择。") from exc
+
+
+@app.delete("/api/editor/annotations/{annotation_id}")
+def delete_annotation(annotation_id: str) -> dict:
+    try:
+        return editor.delete_annotation(annotation_id).model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="批注不存在。") from exc
+
+
+@app.delete("/api/editor/books/{book_id}/chapters/{chapter_index}")
+def delete_editor_chapter(book_id: str, chapter_index: int) -> dict:
+    try:
+        return editor.delete_chapter(book_id, chapter_index).model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="章节不存在或已经删除。") from exc
+
+
+@app.post("/api/editor/books/{book_id}/chapters/{chapter_index}/delete")
+def delete_editor_chapter_action(book_id: str, chapter_index: int) -> dict:
+    """POST action alias for clients or local proxies that reject DELETE."""
+
+    return delete_editor_chapter(book_id, chapter_index)
+
+
+@app.post("/api/editor/books/{book_id}/chapters/{chapter_index}/rename")
+def rename_editor_chapter(book_id: str, chapter_index: int, payload: ChapterRenameRequest) -> dict:
+    try:
+        return editor.rename_chapter(book_id, chapter_index, payload.title).model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="章节不存在或已经删除。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/editor/undo")
+def undo_editor_operation() -> dict:
+    return editor.undo().model_dump(mode="json")
+
+
+@app.post("/api/editor/save")
+def save_editor() -> dict:
+    try:
+        return editor.save().model_dump(mode="json")
+    except EpubEditError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/database/update", status_code=202)
+def start_database_update() -> dict:
+    try:
+        return database_update.start(editor.has_unsaved_changes)
+    except DatabaseUpdateBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/database/update")
+def database_update_state() -> dict:
+    return database_update.state()
 
 
 @app.get("/api/sessions")
@@ -124,11 +280,21 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                     payload.selected_books,
                     payload.debug,
                     on_status,
+                    payload.scope,
+                    payload.book_id,
+                    payload.book_title,
+                    payload.chapter_index,
+                    payload.selected_text,
+                    payload.selected_paragraphs,
                 )
             )
             while not prepare_task.done():
                 if await request.is_disconnected():
                     cancelled.set()
+                    try:
+                        await prepare_task
+                    except Exception:
+                        pass
                     return
                 try:
                     event = await asyncio.wait_for(status_queue.get(), timeout=0.15)
@@ -162,6 +328,15 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                 yield sse("answer_delta", {"text": delta})
 
             citations = build_citations(prepared.retrieval.chunks)
+            citations = [
+                citation.model_copy(
+                    update={
+                        "reader_location": reader.locate(item.chunk.book_id, item.chunk.text)
+                        or citation.reader_location
+                    }
+                )
+                for citation, item in zip(citations, prepared.retrieval.chunks, strict=True)
+            ]
             answer = AnswerWithCitations(answer="".join(answer_parts).strip(), citations=citations)
             updated = await asyncio.to_thread(service.finalize_turn, prepared, answer)
             yield sse("citations", {"items": [item.model_dump(mode="json") for item in citations]})
@@ -174,6 +349,7 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
             yield sse("complete", {"session": updated.model_dump(mode="json"), "trace": trace})
         except Exception as exc:
             if str(exc) != "request_cancelled":
+                LOGGER.exception("Chat turn failed")
                 yield sse("error", {"code": "turn_failed", "message": safe_error_message(exc)})
         finally:
             cancelled.set()
@@ -191,10 +367,14 @@ def sse(event: str, data: dict) -> str:
 
 
 def safe_error_message(exc: Exception) -> str:
-    message = str(exc).strip()
-    if not message:
-        return "处理请求时发生未知错误。"
-    return message[:300]
+    message = str(exc).strip().lower()
+    if any(token in message for token in ("connection", "connect", "timeout", "timed out", "502", "503")):
+        return "模型服务暂时不可用，请检查模型节点后重试。"
+    if any(token in message for token in ("model", "provider", "openai", "api")):
+        return "模型配置或节点状态异常，请检查后端配置。"
+    if any(token in message for token in ("index", "chroma", "embedding", "rerank")):
+        return "本地检索资源不可用，请检查索引和本地模型。"
+    return "本轮处理失败，请查看后端日志了解原因。"
 
 
 if FRONTEND_DIST.exists():

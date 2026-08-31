@@ -19,7 +19,7 @@ from app.retrieval.keyword_retriever import KeywordRetriever
 from app.retrieval.query_planner import plan_retrieval
 from app.retrieval.reranker import rerank_chunks_with_debug
 from app.retrieval.summary_retriever import SummaryRetriever
-from app.retrieval.vector_retriever import VectorRetriever
+from app.retrieval.vector_retriever import MetadataValue, VectorRetriever
 
 
 class EnhancedRetriever:
@@ -59,9 +59,13 @@ class EnhancedRetriever:
         question: str,
         debug: bool = False,
         conversation: ConversationSession | None = None,
+        metadata_filter: dict[str, MetadataValue] | None = None,
     ) -> RetrievalResult:
         intent = analyze_intent(question, conversation)
-        return self.search_with_plan(intent, plan_retrieval(intent, self.settings), debug)
+        plan = plan_retrieval(intent, self.settings)
+        if metadata_filter:
+            plan = plan.model_copy(update={"queries": apply_metadata_filter(plan.queries, metadata_filter)})
+        return self.search_with_plan(intent, plan, debug)
 
     def search_with_plan(
         self,
@@ -238,3 +242,13 @@ def format_relevance(score: float | None) -> str:
 
 def unique_strings(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def apply_metadata_filter(
+    queries: list[PlannedQuery],
+    metadata_filter: dict[str, MetadataValue],
+) -> list[PlannedQuery]:
+    return [
+        query.model_copy(update={"metadata_filter": {**query.metadata_filter, **metadata_filter}})
+        for query in queries
+    ]

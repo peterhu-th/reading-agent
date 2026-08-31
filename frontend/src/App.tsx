@@ -1,302 +1,343 @@
+import { Bot, Search, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  BookOpen,
-  Check,
-  ChevronLeft,
-  CircleStop,
-  FileText,
-  Library,
-  Menu,
-  MessageSquarePlus,
-  PanelRight,
-  Search,
-  Send,
-  Settings2,
-  Trash2,
-  X,
-} from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import type { CSSProperties } from "react";
 
-import { api, streamChat } from "./api";
-import { StatusStrip } from "./StatusStrip";
-import type { Book, Citation, HealthStatus, RetrievalTrace, Session, SourceDetail, UiMessage } from "./types";
+import { api } from "./api";
+import { ChatDrawer } from "./chat/ChatDrawer";
+import { LibrarySidebar } from "./library/LibrarySidebar";
+import { ReaderToolbar } from "./reader/ReaderToolbar";
+import { ReaderView, type ReaderViewHandle, type TextSelection } from "./reader/ReaderView";
+import type { AnnotationColor, EditorState, HealthStatus, ReaderBook, ReaderChapter, ReaderLocation, ReaderMutation, ReaderPage, ReaderParagraph, ReaderPreferences, ReaderSearchHit } from "./types";
 
-function messagesFromSession(session: Session): UiMessage[] {
-  return session.turns.flatMap((turn) => [
-    { role: "user" as const, text: turn.user_question },
-    { role: "assistant" as const, text: turn.assistant_answer, citations: turn.citations },
-  ]);
+const DEFAULT_PREFERENCES: ReaderPreferences = { fontSize: 18, lineHeight: 1.9, width: "medium", theme: "light" };
+const DEFAULT_EDITOR_STATE: EditorState = { dirty: false, undo_count: 0, last_operation: "", database_updating: false, database_status: "idle", database_message: "" };
+
+interface SavedLocation {
+  chapter: number;
+  paragraph: number;
+  progress: number;
 }
 
 export default function App() {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [activeSession, setActiveSession] = useState<Session | null>(null);
-  const [messages, setMessages] = useState<UiMessage[]>([]);
-  const [books, setBooks] = useState<Book[]>([]);
-  const [selectedBooks, setSelectedBooks] = useState<string[]>([]);
-  const [bookSearch, setBookSearch] = useState("");
-  const [question, setQuestion] = useState("");
-  const [status, setStatus] = useState({ stage: "", message: "" });
-  const [trace, setTrace] = useState<RetrievalTrace | null>(null);
-  const [debug, setDebug] = useState(false);
-  const [source, setSource] = useState<SourceDetail | null>(null);
-  const [error, setError] = useState("");
+  const [books, setBooks] = useState<ReaderBook[]>([]);
+  const [chapters, setChapters] = useState<ReaderChapter[]>([]);
+  const [book, setBook] = useState<ReaderBook | null>(null);
+  const [page, setPage] = useState<ReaderPage | null>(null);
+  const [paragraphs, setParagraphs] = useState<ReaderParagraph[]>([]);
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [leftOpen, setLeftOpen] = useState(false);
-  const [rightOpen, setRightOpen] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState("");
+  const [libraryOpen, setLibraryOpen] = useState(() => {
+    const saved = localStorage.getItem("reader-library-open");
+    if (window.innerWidth > 1180) return true;
+    return saved === "true";
+  });
+  const [chatOpen, setChatOpen] = useState(() => localStorage.getItem("reader-chat-open") === "true");
+  const [chatWidth, setChatWidth] = useState(() => Number(localStorage.getItem("reader-chat-width")) || 400);
+  const [preferences, setPreferences] = useState<ReaderPreferences>(() => readJson("reader-preferences", DEFAULT_PREFERENCES));
+  const [progress, setProgress] = useState(0);
+  const [highlightParagraph, setHighlightParagraph] = useState<number | null>(null);
+  const [selection, setSelection] = useState<TextSelection | null>(null);
+  const [suggestedQuestion, setSuggestedQuestion] = useState("");
+  const [searchResults, setSearchResults] = useState<ReaderSearchHit[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [editorState, setEditorState] = useState<EditorState>(DEFAULT_EDITOR_STATE);
+  const [saving, setSaving] = useState(false);
+  const [contentRevision, setContentRevision] = useState(0);
+  const saveTimer = useRef<number | null>(null);
+  const readerViewRef = useRef<ReaderViewHandle>(null);
 
-  const filteredBooks = useMemo(() => {
-    const needle = bookSearch.trim().toLowerCase();
-    return books.filter((book) => !needle || `${book.title} ${book.author}`.toLowerCase().includes(needle));
-  }, [books, bookSearch]);
+  const activeChapter = useMemo(
+    () => chapters.find((item) => item.chapter_index === page?.chapter.chapter_index) ?? page?.chapter ?? null,
+    [chapters, page],
+  );
 
+  useEffect(() => { void initialize(); }, []);
   useEffect(() => {
-    void initialize();
+    const timer = window.setInterval(() => { void api.health().then(setHealth).catch(() => undefined); }, 10_000);
+    return () => window.clearInterval(timer);
   }, []);
-
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, status]);
+    localStorage.setItem("reader-library-open", String(libraryOpen));
+    localStorage.setItem("reader-chat-open", String(chatOpen));
+    localStorage.setItem("reader-chat-width", String(chatWidth));
+    localStorage.setItem("reader-preferences", JSON.stringify(preferences));
+  }, [libraryOpen, chatOpen, chatWidth, preferences]);
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (searchResults.length) setSearchResults([]);
+      else if (chatOpen) setChatOpen(false);
+      else setLibraryOpen(false);
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [chatOpen, searchResults]);
+  useEffect(() => {
+    if (!editorState.database_updating) return;
+    const timer = window.setInterval(() => {
+      void api.databaseUpdateState().then((state) => {
+        setEditorState((current) => ({ ...current, database_updating: state.running, database_status: state.status, database_message: state.message }));
+      }).catch(() => undefined);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [editorState.database_updating]);
 
   async function initialize() {
     try {
-      const [bookList, sessionList, healthStatus] = await Promise.all([api.listBooks(), api.listSessions(), api.health()]);
-      setBooks(bookList);
-      setHealth(healthStatus);
-      const remembered = sessionStorage.getItem("reading-active-session");
-      let session = sessionList.find((item) => item.session_id === remembered) ?? sessionList[0];
-      if (!session) session = await api.createSession();
-      setSessions(sessionList.some((item) => item.session_id === session.session_id) ? sessionList : [session]);
-      activateSession(session);
+      const [library, currentHealth, currentEditorState] = await Promise.all([api.listBooks(), api.health(), api.editorState()]);
+      setBooks(library);
+      setHealth(currentHealth);
+      setEditorState(currentEditorState);
+      const savedBookId = localStorage.getItem("reader-active-book");
+      const initial = library.find((item) => item.book_id === savedBookId) ?? library[0];
+      if (initial) await openBook(initial);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "无法连接后端服务");
+      setError(caught instanceof Error ? caught.message : "无法载入本地书库");
     } finally {
       setLoading(false);
     }
   }
 
-  function activateSession(session: Session) {
-    setActiveSession(session);
-    setMessages(messagesFromSession(session));
-    setSelectedBooks(session.explicit_book_titles ?? []);
-    setTrace(null);
-    setSource(null);
-    sessionStorage.setItem("reading-active-session", session.session_id);
-  }
-
-  async function newSession() {
-    const session = await api.createSession();
-    setSessions((current) => [session, ...current]);
-    activateSession(session);
-    setLeftOpen(false);
-  }
-
-  async function removeSession(id: string) {
-    await api.deleteSession(id);
-    const remaining = sessions.filter((item) => item.session_id !== id);
-    if (activeSession?.session_id === id) {
-      const next = remaining[0] ?? (await api.createSession());
-      activateSession(next);
-      setSessions(remaining.length ? remaining : [next]);
-    } else {
-      setSessions(remaining);
-    }
-  }
-
-  function toggleBook(title: string) {
-    setSelectedBooks((current) => current.includes(title) ? current.filter((item) => item !== title) : [...current, title]);
-  }
-
-  async function openCitation(citation: Citation) {
-    try {
-      setSource(await api.getSource(citation.source_id));
-      setRightOpen(true);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "无法读取引用原文");
-    }
-  }
-
-  async function submit() {
-    const text = question.trim();
-    if (!text || !activeSession || abortRef.current) return;
-    setQuestion("");
+  async function openBook(nextBook: ReaderBook, chapterOverride?: number, paragraphOverride?: number) {
+    setLoading(true);
     setError("");
-    setTrace(null);
-    setMessages((current) => [...current, { role: "user", text }, { role: "assistant", text: "", pending: true }]);
-    const controller = new AbortController();
-    abortRef.current = controller;
-
     try {
-      await streamChat(
-        { session_id: activeSession.session_id, question: text, selected_books: selectedBooks, debug },
-        controller.signal,
-        (event, data) => {
-          if (event === "status") {
-            setStatus({ stage: String(data.stage ?? ""), message: String(data.message ?? "") });
-          } else if (event === "answer_delta") {
-            const delta = String(data.text ?? "");
-            setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, text: item.text + delta } : item));
-          } else if (event === "citations") {
-            const citations = data.items as Citation[];
-            setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, citations } : item));
-          } else if (event === "clarification") {
-            const clarification = String(data.message ?? "请补充信息。 ");
-            setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, text: clarification, pending: false } : item));
-          } else if (event === "complete") {
-            const session = data.session as unknown as Session;
-            if (session) {
-              setActiveSession(session);
-              setSessions((current) => [session, ...current.filter((item) => item.session_id !== session.session_id)]);
-            }
-            if (data.trace) setTrace(data.trace as unknown as RetrievalTrace);
-          } else if (event === "error") {
-            const message = String(data.message ?? "生成失败");
-            setError(message);
-            setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, text: `未能生成回答：${message}`, pending: false } : item));
-          }
-        },
-      );
+      const chapterList = await api.listChapters(nextBook.book_id);
+      setBook(nextBook);
+      setChapters(chapterList);
+      localStorage.setItem("reader-active-book", nextBook.book_id);
+      const saved = readJson<SavedLocation | null>(`reader-location:${nextBook.book_id}`, null);
+      setProgress(saved?.progress ?? 0);
+      const targetChapter = chapterOverride ?? saved?.chapter ?? chapterList[0]?.chapter_index;
+      const targetParagraph = paragraphOverride ?? saved?.paragraph;
+      if (targetChapter !== undefined) await loadChapter(nextBook, targetChapter, targetParagraph);
     } catch (caught) {
-      if (!controller.signal.aborted) {
-        const message = caught instanceof Error ? caught.message : "生成失败";
-        setError(message);
-        setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, text: `未能生成回答：${message}`, pending: false } : item));
-      }
+      setError(caught instanceof Error ? caught.message : "无法打开书籍");
     } finally {
-      abortRef.current = null;
-      setStatus({ stage: "", message: "" });
-      setMessages((current) => current.map((item, index) => index === current.length - 1 ? { ...item, pending: false } : item));
+      setLoading(false);
     }
   }
 
-  function stop() {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setStatus({ stage: "", message: "" });
+  async function loadChapter(targetBook: ReaderBook, chapterIndex: number, focusParagraph?: number) {
+    setLoading(true);
+    setSearchResults([]);
+    try {
+      const result = await api.getChapter(targetBook.book_id, chapterIndex, 0, 80, focusParagraph);
+      setPage(result);
+      setParagraphs(result.paragraphs);
+      setContentRevision((current) => current + 1);
+      setHighlightParagraph(focusParagraph ?? null);
+      if (focusParagraph !== undefined) window.setTimeout(() => setHighlightParagraph(null), 2600);
+    } finally {
+      setLoading(false);
+    }
   }
 
-  if (loading) return <div className="boot-screen"><BookOpen size={30} />正在载入书库…</div>;
+  async function selectChapter(chapterIndex: number) {
+    if (!book) return;
+    await loadChapter(book, chapterIndex);
+    if (window.innerWidth <= 1180) setLibraryOpen(false);
+  }
+
+  async function loadMore() {
+    if (!book || !page || page.next_offset === null || loading) return;
+    setLoading(true);
+    try {
+      const next = await api.getChapter(book.book_id, page.chapter.chapter_index, page.next_offset, 80);
+      setParagraphs((current) => [...current, ...next.paragraphs]);
+      setPage({ ...page, next_offset: next.next_offset });
+      setContentRevision((current) => current + 1);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function saveProgress(paragraph: number, nextProgress: number) {
+    setProgress(nextProgress);
+    if (!book || !page) return;
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      localStorage.setItem(`reader-location:${book.book_id}`, JSON.stringify({ chapter: page.chapter.chapter_index, paragraph, progress: nextProgress }));
+    }, 250);
+  }
+
+  async function searchChapter(query: string) {
+    if (!book || !page || !query.trim()) return;
+    setSearchQuery(query);
+    setSearchResults(await api.searchBook(book.book_id, query.trim(), page.chapter.chapter_index));
+  }
+
+  async function jumpToSearch(hit: ReaderSearchHit) {
+    if (!book) return;
+    await loadChapter(book, hit.chapter_index, hit.paragraph_index);
+    setSearchResults([]);
+  }
+
+  async function jumpToCitation(location: ReaderLocation) {
+    const targetBook = books.find((item) => item.book_id === location.book_id);
+    if (!targetBook) return;
+    if (book?.book_id !== targetBook.book_id) await openBook(targetBook, location.chapter_index, location.start_paragraph_index);
+    else await loadChapter(targetBook, location.chapter_index, location.start_paragraph_index);
+  }
+
+  function askSelection(nextSelection: TextSelection, prompt: string) {
+    setSelection(nextSelection);
+    setSuggestedQuestion(prompt);
+    setChatOpen(true);
+  }
+
+  async function applyEdits(mutations: ReaderMutation[], label: string) {
+    if (!book) return;
+    const byId = new Map(mutations.map((item) => [item.edit_id, item]));
+    setParagraphs((current) => current.flatMap((paragraph) => {
+      const mutation = byId.get(paragraph.edit_id);
+      if (!mutation) return [paragraph];
+      return mutation.deleted ? [] : [{ ...paragraph, text: mutation.text }];
+    }));
+    try {
+      setEditorState(await api.applyEditorOperation(book.book_id, label, mutations));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "正文修改失败");
+      if (page) await loadChapter(book, page.chapter.chapter_index);
+    }
+  }
+
+  async function deleteChapter(chapter: ReaderChapter) {
+    if (!book) return;
+    setError("");
+    if (!health?.editor_capabilities?.includes("chapter_delete")) {
+      setError("当前 Web 后端仍是旧版本，尚未加载章节删除接口。请停止服务后重新运行 python scripts/run_web.py。");
+      return;
+    }
+    try {
+      await readerViewRef.current?.flush();
+      setEditorState(await api.deleteChapter(book.book_id, chapter.chapter_index));
+      const [nextBooks, nextChapters] = await Promise.all([api.listBooks(), api.listChapters(book.book_id)]);
+      const nextBook = nextBooks.find((item) => item.book_id === book.book_id) ?? book;
+      setBooks(nextBooks);
+      setBook(nextBook);
+      setChapters(nextChapters);
+      if (page?.chapter.chapter_index !== chapter.chapter_index) return;
+      const replacement = nextChapters.find((item) => item.chapter_index > chapter.chapter_index) ?? nextChapters.at(-1);
+      if (replacement) await loadChapter(nextBook, replacement.chapter_index);
+      else {
+        setPage(null);
+        setParagraphs([]);
+        setContentRevision((current) => current + 1);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "删除章节失败");
+    }
+  }
+
+  async function renameChapter(chapter: ReaderChapter, title: string) {
+    if (!book) return;
+    setError("");
+    if (!health?.editor_capabilities?.includes("chapter_rename")) {
+      setError("当前 Web 后端仍是旧版本，尚未加载章节改名接口。请停止服务后重新运行 python scripts/run_web.py。");
+      return;
+    }
+    try {
+      await readerViewRef.current?.flush();
+      setEditorState(await api.renameChapter(book.book_id, chapter.chapter_index, title));
+      const nextChapters = await api.listChapters(book.book_id);
+      setChapters(nextChapters);
+      const renamed = nextChapters.find((item) => item.chapter_index === chapter.chapter_index);
+      if (renamed && page?.chapter.chapter_index === chapter.chapter_index) {
+        setPage((current) => current ? { ...current, chapter: renamed } : current);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "修改章节名称失败");
+    }
+  }
+
+  async function addAnnotation(nextSelection: TextSelection, color: AnnotationColor, comment: string) {
+    if (!book || !page) return;
+    try {
+      const result = await api.addAnnotation({
+        book_id: book.book_id,
+        chapter_index: page.chapter.chapter_index,
+        start_edit_id: nextSelection.startEditId,
+        end_edit_id: nextSelection.endEditId,
+        start_offset: nextSelection.startOffset,
+        end_offset: nextSelection.endOffset,
+        selected_text: nextSelection.text,
+        color,
+        comment,
+      });
+      setEditorState(result.state);
+      setParagraphs((current) => current.map((paragraph) => paragraph.paragraph_index >= nextSelection.paragraphs[0] && paragraph.paragraph_index <= nextSelection.paragraphs[1] ? { ...paragraph, annotations: [...paragraph.annotations, result.annotation] } : paragraph));
+      setContentRevision((current) => current + 1);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "批注保存失败");
+    }
+  }
+
+  async function undoEditor() {
+    if (!book) return;
+    try {
+      await readerViewRef.current?.flush();
+      setEditorState(await api.undoEditor());
+      const [nextBooks, nextChapters] = await Promise.all([api.listBooks(), api.listChapters(book.book_id)]);
+      const nextBook = nextBooks.find((item) => item.book_id === book.book_id) ?? book;
+      setBooks(nextBooks);
+      setBook(nextBook);
+      setChapters(nextChapters);
+      const currentChapterIndex = page?.chapter.chapter_index;
+      const chapterIndex = currentChapterIndex !== undefined && nextChapters.some((item) => item.chapter_index === currentChapterIndex)
+        ? currentChapterIndex
+        : nextChapters[0]?.chapter_index;
+      if (chapterIndex !== undefined) await loadChapter(nextBook, chapterIndex);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "撤销失败");
+    }
+  }
+
+  async function saveEditor() {
+    setSaving(true);
+    try {
+      await readerViewRef.current?.flush();
+      setEditorState(await api.saveEditor());
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "保存失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function updateDatabase() {
+    try {
+      await readerViewRef.current?.flush();
+      const state = await api.startDatabaseUpdate();
+      setEditorState((current) => ({ ...current, database_updating: state.running, database_status: state.status, database_message: state.message }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "无法启动数据库更新");
+    }
+  }
 
   return (
-    <div className="app-shell">
-      <aside className={`left-panel ${leftOpen ? "is-open" : ""}`}>
-        <div className="brand-row">
-          <BookOpen size={22} />
-          <div><strong>Reading Memory</strong><small>本地中文阅读助理</small></div>
-          <button className="icon-button mobile-only" onClick={() => setLeftOpen(false)} title="关闭侧栏"><X /></button>
-        </div>
-        <button className="primary-command" onClick={() => void newSession()}><MessageSquarePlus size={17} />新对话</button>
-        <section className="side-section session-section">
-          <h2>会话</h2>
-          <div className="session-list">
-            {sessions.map((session) => (
-              <div className={`session-row ${session.session_id === activeSession?.session_id ? "is-active" : ""}`} key={session.session_id}>
-                <button onClick={() => activateSession(session)}>{session.title}</button>
-                <button className="icon-button subtle" onClick={() => void removeSession(session.session_id)} title="删除会话"><Trash2 size={14} /></button>
-              </div>
-            ))}
-          </div>
-        </section>
-        <section className="side-section library-section">
-          <div className="section-heading"><h2>书库</h2><span>{books.length}</span></div>
-          <label className="search-field"><Search size={15} /><input value={bookSearch} onChange={(event) => setBookSearch(event.target.value)} placeholder="搜索书名或作者" /></label>
-          <div className="book-list">
-            {filteredBooks.map((book) => (
-              <label className="book-row" key={book.book_id}>
-                <input type="checkbox" checked={selectedBooks.includes(book.title)} onChange={() => toggleBook(book.title)} />
-                <span className="custom-check">{selectedBooks.includes(book.title) && <Check size={12} />}</span>
-                <span><strong>{book.title}</strong><small>{book.author || "作者未知"} · {book.chapter_count} 章</small></span>
-              </label>
-            ))}
-          </div>
-        </section>
-      </aside>
-
-      <main className="chat-panel">
-        <header className="topbar">
-          <button className="icon-button mobile-only" onClick={() => setLeftOpen(true)} title="打开侧栏"><Menu /></button>
-          <div><h1>{activeSession?.title ?? "新对话"}</h1><p>{selectedBooks.length ? `已限定 ${selectedBooks.length} 本书` : "检索全部书库"}</p></div>
-          <div className="top-actions">
-            <label className="debug-toggle" title="显示检索轮次和证据检查"><input type="checkbox" checked={debug} onChange={(event) => setDebug(event.target.checked)} /><Settings2 size={16} />调试</label>
-            <button className="icon-button" onClick={() => setRightOpen(true)} title="打开证据面板"><PanelRight /></button>
-          </div>
-        </header>
-
-        <div className="message-scroll">
-          {!messages.length && (
-            <div className="empty-state">
-              <Library size={34} />
-              <h2>从你的书库开始提问</h2>
-              <div className="suggestions">
-                {["《荒原狼》主要讲了什么？", "比较两本书对孤独的理解", "推荐能回应焦虑状态的书中片段"].map((item) => <button key={item} onClick={() => setQuestion(item)}>{item}</button>)}
-              </div>
-            </div>
-          )}
-          {messages.map((message, index) => (
-            <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
-              <div className="message-label">{message.role === "user" ? "你" : "阅读助理"}</div>
-              <div className="message-body">
-                {message.text ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown> : message.pending ? <div className="typing"><i /><i /><i /></div> : <p>本轮没有生成内容。</p>}
-              </div>
-              {!!message.citations?.length && (
-                <div className="citation-list">
-                  {message.citations.map((citation) => <button key={citation.source_id} onClick={() => void openCitation(citation)}><FileText size={14} />[{citation.display_index}] {citation.title} · {citation.chapter_title}</button>)}
-                </div>
-              )}
-            </article>
-          ))}
-          {status.stage && <StatusStrip stage={status.stage} message={status.message} />}
-          {health && !health.answer_provider_ready && (
-            <div className="service-warning">回答服务没有可用节点。请在 AIClient2API 中重新登录或启用健康节点；本地书库和检索索引仍然可用。</div>
-          )}
-          {error && <div className="error-banner">{error}<button onClick={() => setError("")}><X size={15} /></button></div>}
-          {debug && trace && <DebugTrace trace={trace} />}
-          <div ref={bottomRef} />
-        </div>
-
-        <div className="composer-wrap">
-          <div className="selected-books">
-            {selectedBooks.map((title) => <button key={title} onClick={() => toggleBook(title)}>《{title}》<X size={12} /></button>)}
-          </div>
-          <div className="composer">
-            <textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} placeholder="询问情节、人物、主题，或比较多本书…" rows={2} />
-            {abortRef.current ? <button className="send-button stop" onClick={stop} title="停止生成"><CircleStop /></button> : <button className="send-button" disabled={!question.trim()} onClick={() => void submit()} title="发送"><Send /></button>}
-          </div>
-          <small>回答仅依据当前本地书库，引用可展开核对原文。</small>
-        </div>
+    <div className={`reader-app theme-${preferences.theme} ${libraryOpen ? "library-visible" : ""} ${chatOpen ? "chat-visible" : ""}`} style={{ "--chat-width": `${chatWidth}px` } as CSSProperties}>
+      <LibrarySidebar open={libraryOpen} books={books} chapters={chapters} activeBookId={book?.book_id ?? ""} activeChapter={page?.chapter.chapter_index ?? null} onClose={() => setLibraryOpen(false)} onBook={(value) => void openBook(value)} onChapter={(value) => void selectChapter(value)} onRenameChapter={(chapter, title) => void renameChapter(chapter, title)} onDeleteChapter={(value) => void deleteChapter(value)} />
+      <main className="reader-main">
+        <ReaderToolbar title={book?.title ?? ""} chapterTitle={activeChapter?.chapter_title ?? ""} progress={progress} preferences={preferences} chatOpen={chatOpen} editorState={editorState} saving={saving} onLibrary={() => setLibraryOpen((value) => !value)} onChat={() => setChatOpen((value) => !value)} onPreferences={setPreferences} onSearch={(query) => void searchChapter(query)} onUndo={() => void undoEditor()} onSave={() => void saveEditor()} onUpdateDatabase={() => void updateDatabase()} />
+        <ReaderView ref={readerViewRef} book={book} page={page} paragraphs={paragraphs} preferences={preferences} loading={loading} contentRevision={contentRevision} highlightParagraph={highlightParagraph} onChapter={(value) => void selectChapter(value)} onLoadMore={() => void loadMore()} onProgress={saveProgress} onAskSelection={askSelection} onEdit={applyEdits} onAnnotate={addAnnotation} onUndo={undoEditor} />
+        {error && <div className="global-error">{error}<button onClick={() => setError("")}><X /></button></div>}
+        {editorState.database_message && editorState.database_status !== "idle" && <div className={`database-status status-${editorState.database_status}`}>{editorState.database_message}</div>}
+        {!chatOpen && <button className="floating-chat" onClick={() => setChatOpen(true)} title="打开阅读助理"><Bot /></button>}
       </main>
-
-      <aside className={`right-panel ${rightOpen ? "is-open" : ""}`}>
-        <div className="evidence-header">
-          <button className="icon-button mobile-only" onClick={() => setRightOpen(false)} title="返回"><ChevronLeft /></button>
-          <div><h2>原文证据</h2><p>点击回答下方引用查看</p></div>
-          <button className="icon-button" onClick={() => setSource(null)} title="清除当前证据"><X /></button>
-        </div>
-        {source ? (
-          <div className="source-view">
-            <div className="source-meta"><span>{source.title}</span><strong>{source.chapter_title || `第 ${source.chapter_index} 章`}</strong><small>{source.author || "作者未知"} · 段落 {source.paragraph_range}</small></div>
-            <p>{source.text}</p>
-          </div>
-        ) : (
-          <div className="source-empty"><FileText size={30} /><p>选择一条引用后，这里会显示对应的完整 chunk 原文。</p></div>
-        )}
-      </aside>
-      {(leftOpen || rightOpen) && <button className="mobile-scrim" onClick={() => { setLeftOpen(false); setRightOpen(false); }} aria-label="关闭面板" />}
+      <ChatDrawer open={chatOpen} width={chatWidth} health={health} book={book} chapter={activeChapter} selection={selection} suggestedQuestion={suggestedQuestion} onClose={() => setChatOpen(false)} onWidth={setChatWidth} onCitation={(location) => void jumpToCitation(location)} onSelectionConsumed={() => { setSelection(null); setSuggestedQuestion(""); }} />
+      {searchResults.length > 0 && <div className="search-results"><header><Search /><strong>“{searchQuery}”的结果</strong><button onClick={() => setSearchResults([])}><X /></button></header>{searchResults.map((hit) => <button key={`${hit.chapter_index}:${hit.paragraph_index}`} onClick={() => void jumpToSearch(hit)}><span>{hit.chapter_title} · 段落 {hit.paragraph_index}</span><p>{hit.excerpt}</p></button>)}</div>}
+      {(libraryOpen || chatOpen) && <button className="mobile-scrim" onClick={() => { setLibraryOpen(false); setChatOpen(false); }} aria-label="关闭面板" />}
     </div>
   );
 }
 
-function DebugTrace({ trace }: { trace: RetrievalTrace }) {
-  return (
-    <details className="debug-trace">
-      <summary>检索调试 · {trace.rounds.length} 轮 · 证据{trace.evidence_sufficient ? "充分" : "仍有缺口"}</summary>
-      {trace.rounds.map((round) => <p key={round.round_index}>第 {round.round_index} 轮：新增 {round.new_chunk_count} 条，{round.stop_reason || "继续检查"}</p>)}
-      {trace.missing_aspects.map((item) => <p key={item}>缺口：{item}</p>)}
-      {trace.debug_lines.map((line) => <code key={line}>{line}</code>)}
-    </details>
-  );
+function readJson<T>(key: string, fallback: T): T {
+  try {
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) as T : fallback;
+  } catch {
+    return fallback;
+  }
 }

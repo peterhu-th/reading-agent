@@ -3,8 +3,9 @@ from collections.abc import Callable
 from app.config import get_settings
 from app.models.schemas import ConversationSession, EvidenceAssessment, IterativeRetrievalResult, RetrievalDebugInfo, RetrievalPlan, RetrievalRound, RetrievedChunk
 from app.retrieval.evidence_checker import assess_evidence
-from app.retrieval.hybrid_retriever import EnhancedRetriever, balance_comparison_results
+from app.retrieval.hybrid_retriever import EnhancedRetriever, apply_metadata_filter, balance_comparison_results
 from app.retrieval.reranker import rerank_chunks_with_debug
+from app.retrieval.vector_retriever import MetadataValue
 
 
 StatusCallback = Callable[[str, int, str], None]
@@ -17,9 +18,9 @@ class IterativeRetriever:
         self.retriever = retriever or EnhancedRetriever()
         self.settings = get_settings()
 
-    def search(self, question: str, conversation: ConversationSession | None = None, debug: bool = False, status_callback: StatusCallback | None = None) -> IterativeRetrievalResult:
+    def search(self, question: str, conversation: ConversationSession | None = None, debug: bool = False, status_callback: StatusCallback | None = None, metadata_filter: dict[str, MetadataValue] | None = None) -> IterativeRetrievalResult:
         notify(status_callback, "retrieving", 0, "正在检索原文")
-        initial = self.retriever.search(question, debug=debug, conversation=conversation)
+        initial = self.retriever.search(question, debug=debug, conversation=conversation, metadata_filter=metadata_filter)
         all_chunks = list(initial.chunks)
         all_queries = list(initial.plan.queries)
         rounds: list[RetrievalRound] = []
@@ -38,6 +39,8 @@ class IterativeRetriever:
 
             notify(status_callback, "supplementing", round_index, f"正在进行第 {round_index} 轮补充检索")
             executed_queries = assessment.supplemental_queries
+            if metadata_filter:
+                executed_queries = apply_metadata_filter(executed_queries, metadata_filter)
             supplement_plan = initial.plan.model_copy(update={"queries": executed_queries, "use_summary_index": initial.plan.use_summary_index})
             supplement = self.retriever.search_with_plan(initial.intent, supplement_plan, debug=debug)
             before = len({item.chunk.chunk_id for item in all_chunks})

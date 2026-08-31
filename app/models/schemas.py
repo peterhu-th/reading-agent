@@ -79,7 +79,7 @@ class PlannedQuery(BaseModel):
     """One concrete retrieval query plus optional metadata filters."""
 
     query: str = Field(min_length=1)
-    metadata_filter: dict[str, str | list[str]] = Field(default_factory=dict)
+    metadata_filter: dict[str, str | int | list[str] | list[int]] = Field(default_factory=dict)
     purpose: str = ""
 
 
@@ -161,6 +161,7 @@ class Citation(BaseModel):
     chapter_title: str = ""
     paragraph_range: str = ""
     excerpt: str = ""
+    reader_location: "ReaderLocation | None" = None
 
 
 class AnswerWithCitations(BaseModel):
@@ -260,8 +261,143 @@ class BookSummary(BaseModel):
     chunk_count: int = 0
 
 
+class ReaderLocation(BaseModel):
+    """Stable location used to navigate from an answer citation into the reader."""
+
+    book_id: str = Field(min_length=1)
+    chapter_index: int = Field(ge=0)
+    start_paragraph_index: int = Field(ge=0)
+    end_paragraph_index: int = Field(ge=0)
+
+
+Citation.model_rebuild()
+
+
+class ReaderBook(BaseModel):
+    book_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    author: str = ""
+    book_type: str = "fiction"
+    chapter_count: int = Field(default=0, ge=0)
+    paragraph_count: int = Field(default=0, ge=0)
+
+
+class ReaderChapter(BaseModel):
+    book_id: str = Field(min_length=1)
+    chapter_index: int = Field(ge=0)
+    chapter_title: str = ""
+    depth: int = Field(default=0, ge=0)
+    paragraph_count: int = Field(default=0, ge=0)
+    preview: str = ""
+
+
+class ReaderParagraph(BaseModel):
+    paragraph_index: int = Field(ge=0)
+    edit_id: str = ""
+    text: str = Field(min_length=1)
+    kind: str = Field(default="paragraph", pattern="^(paragraph|heading|verse|quote|list)$")
+    annotations: list["ReaderAnnotation"] = Field(default_factory=list)
+
+
+class ReaderContentRecord(BaseModel):
+    """Lossless text record used only by the EPUB reader, never by RAG retrieval."""
+
+    book_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    author: str = ""
+    book_type: str = "fiction"
+    chapter_index: int = Field(ge=0)
+    chapter_title: str = ""
+    chapter_depth: int = Field(default=0, ge=0)
+    paragraph_index: int = Field(ge=0)
+    text: str = Field(min_length=1)
+    kind: str = Field(default="paragraph", pattern="^(paragraph|heading|verse|quote|list)$")
+    source_epub: str = ""
+    source_href: str = ""
+    source_node_path: str = ""
+    source_line_index: int = Field(default=0, ge=0)
+
+
+class ReaderAnnotation(BaseModel):
+    annotation_id: str = Field(default_factory=lambda: uuid4().hex)
+    book_id: str = Field(min_length=1)
+    chapter_index: int = Field(ge=0)
+    start_edit_id: str = Field(min_length=1)
+    end_edit_id: str = Field(min_length=1)
+    start_offset: int = Field(default=0, ge=0)
+    end_offset: int = Field(default=0, ge=0)
+    selected_text: str = ""
+    color: str = Field(default="yellow", pattern="^(yellow|green|blue|red)$")
+    comment: str = ""
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class ReaderMutation(BaseModel):
+    edit_id: str = Field(min_length=1)
+    text: str = ""
+    deleted: bool = False
+
+
+class ReaderOperationRequest(BaseModel):
+    book_id: str = Field(min_length=1)
+    label: str = "编辑正文"
+    mutations: list[ReaderMutation] = Field(min_length=1)
+
+
+class ChapterRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+
+
+class AnnotationCreateRequest(BaseModel):
+    book_id: str = Field(min_length=1)
+    chapter_index: int = Field(ge=0)
+    start_edit_id: str = Field(min_length=1)
+    end_edit_id: str = Field(min_length=1)
+    start_offset: int = Field(default=0, ge=0)
+    end_offset: int = Field(default=0, ge=0)
+    selected_text: str = ""
+    color: str = Field(default="yellow", pattern="^(yellow|green|blue|red)$")
+    comment: str = ""
+
+
+class EditorState(BaseModel):
+    dirty: bool = False
+    undo_count: int = Field(default=0, ge=0)
+    last_operation: str = ""
+    database_updating: bool = False
+    database_status: str = "idle"
+    database_message: str = ""
+
+
+ReaderParagraph.model_rebuild()
+
+
+class ReaderPage(BaseModel):
+    book: ReaderBook
+    chapter: ReaderChapter
+    paragraphs: list[ReaderParagraph] = Field(default_factory=list)
+    offset: int = Field(default=0, ge=0)
+    next_offset: int | None = None
+    previous_chapter_index: int | None = None
+    next_chapter_index: int | None = None
+
+
+class ReaderSearchHit(BaseModel):
+    chapter_index: int = Field(ge=0)
+    chapter_title: str = ""
+    paragraph_index: int = Field(ge=0)
+    excerpt: str = ""
+
+
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1)
     question: str = Field(min_length=1)
     selected_books: list[str] = Field(default_factory=list)
+    scope: str = Field(default="library", pattern="^(library|book|chapter)$")
+    book_id: str = ""
+    book_title: str = ""
+    chapter_index: int | None = Field(default=None, ge=0)
+    selected_text: str = Field(default="", max_length=4000)
+    selected_paragraphs: list[int] = Field(default_factory=list)
     debug: bool = False

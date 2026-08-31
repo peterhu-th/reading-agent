@@ -23,6 +23,10 @@ def test_build_citations_contains_source_metadata():
     assert citations[0].title == "Test Book"
     assert citations[0].paragraph_range == "0-1"
     assert citations[0].source_id != "book1:0:0"
+    assert citations[0].reader_location is not None
+    assert citations[0].reader_location.book_id == "book1"
+    assert citations[0].reader_location.chapter_index == 0
+    assert citations[0].reader_location.start_paragraph_index == 0
 
 
 def test_build_context_contains_text_and_number():

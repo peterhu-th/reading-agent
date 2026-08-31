@@ -36,6 +36,8 @@ class Settings(BaseModel):
     VECTOR_DB_PATH: str = "./data/index/chroma"
     RAW_EPUB_DIR: str = "./data/raw/epub"
     BOOKS_JSONL_PATH: str = "./data/processed/books_jsonl/books.jsonl"
+    READER_JSONL_PATH: str = "./data/processed/reader_jsonl/reader.jsonl"
+    ANNOTATIONS_JSON_PATH: str = "./data/user/annotations.json"
     CHUNKS_JSONL_PATH: str = "./data/processed/chunks_jsonl/chunks.jsonl"
     SUMMARIES_JSONL_PATH: str = "./data/processed/summaries_jsonl/summaries.jsonl"
     CHROMA_COLLECTION: str = "reading_memory_chunks"
@@ -104,6 +106,8 @@ def get_settings() -> Settings:
         VECTOR_DB_PATH=os.getenv("VECTOR_DB_PATH", "./data/index/chroma"),
         RAW_EPUB_DIR=os.getenv("RAW_EPUB_DIR", "./data/raw/epub"),
         BOOKS_JSONL_PATH=os.getenv("BOOKS_JSONL_PATH", "./data/processed/books_jsonl/books.jsonl"),
+        READER_JSONL_PATH=os.getenv("READER_JSONL_PATH", "./data/processed/reader_jsonl/reader.jsonl"),
+        ANNOTATIONS_JSON_PATH=os.getenv("ANNOTATIONS_JSON_PATH", "./data/user/annotations.json"),
         CHUNKS_JSONL_PATH=os.getenv("CHUNKS_JSONL_PATH", "./data/processed/chunks_jsonl/chunks.jsonl"),
         SUMMARIES_JSONL_PATH=os.getenv("SUMMARIES_JSONL_PATH", "./data/processed/summaries_jsonl/summaries.jsonl"),
         CHROMA_COLLECTION=os.getenv("CHROMA_COLLECTION", "reading_memory_chunks"),
