@@ -26,6 +26,21 @@ def make_epub(path: Path) -> None:
     epub.write_epub(str(path), book)
 
 
+def make_nonstandard_epub(path: Path) -> None:
+    book = epub.EpubBook()
+    book.set_identifier("fallback-editor-test-book")
+    book.set_title("非标准标签编辑测试")
+    book.set_language("zh")
+    chapter = epub.EpubHtml(title="目录页", file_name="contents.xhtml", lang="zh")
+    chapter.content = "<html><body><div>目录</div><div><a href='chapter.xhtml'>第一章</a></div></body></html>"
+    book.add_item(chapter)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.toc = (epub.Link("contents.xhtml", "目录页", "contents"),)
+    book.spine = ["nav", chapter]
+    epub.write_epub(str(path), book)
+
+
 def write_reader(path: Path, records) -> None:
     path.write_text(
         "".join(json.dumps(item.model_dump(mode="json"), ensure_ascii=False) + "\n" for item in records),
@@ -50,6 +65,33 @@ def test_epub_editor_updates_and_deletes_source_nodes(tmp_path):
     texts = [item.text for item in updated]
     assert "修改后的正文" in texts
     assert "删除正文" not in texts
+
+
+def test_nonstandard_reader_blocks_receive_editable_node_paths(tmp_path):
+    epub_path = tmp_path / "fallback.epub"
+    make_nonstandard_epub(epub_path)
+
+    records = load_epub_for_reader(epub_path)
+
+    assert records
+    assert all(record.source_node_path for record in records)
+
+
+def test_chapter_delete_saves_legacy_records_without_node_paths(tmp_path):
+    epub_path = tmp_path / "fallback.epub"
+    make_nonstandard_epub(epub_path)
+    records = load_epub_for_reader(epub_path)
+    legacy_records = [record.model_copy(update={"source_node_path": ""}) for record in records]
+    target_chapter = next(record.chapter_index for record in legacy_records if record.source_href == "contents.xhtml")
+    target_records = [record for record in legacy_records if record.chapter_index == target_chapter]
+
+    EpubEditorService(tmp_path).save(
+        legacy_records,
+        {},
+        {reader_edit_id(record) for record in target_records},
+    )
+
+    assert all(record.source_href != "contents.xhtml" for record in load_epub_for_reader(epub_path))
 
 
 def test_editor_clears_pre_save_undo_stack_after_save(tmp_path):

@@ -134,11 +134,20 @@ def clean_book_title(title: str | None) -> str | None:
 def make_book_id(metadata: BookMetadata, file_hash: str) -> str:
     """Create a stable ID for a book.
 
-    Prefer the EPUB identifier when present because it survives file movement and
-    renaming. Fall back to the content hash when identifier metadata is missing.
+    Combine an EPUB identifier with bibliographic metadata because some EPUB
+    generators reuse one identifier across unrelated books. This remains stable
+    across file movement, renaming, and body-text edits. Fall back to the content
+    hash when identifier metadata is missing.
     """
     if metadata.identifier:
-        raw = f"epub-identifier:{metadata.identifier}".encode("utf-8")
+        identity = "\0".join(
+            (
+                metadata.identifier,
+                metadata.title or "",
+                *metadata.authors,
+            )
+        )
+        raw = f"epub-identity:{identity}".encode("utf-8")
         return hashlib.sha256(raw).hexdigest()
     return file_hash
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import unquote, urlsplit
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 from ebooklib import epub
 
 from app.ingestion.chunking import infer_book_type
@@ -164,9 +164,7 @@ def extract_reader_blocks(
     for node in soup.find_all(BLOCK_TAGS):
         if node.find_parent(BLOCK_TAGS):
             continue
-        raw_lines = node.get_text("\n", strip=True).splitlines()
-        lines = [normalize_inline_text(line) for line in raw_lines]
-        lines = [line for line in lines if line]
+        lines = block_text_lines(node)
         if not lines:
             continue
         kind = block_kind(node, poetry)
@@ -185,21 +183,51 @@ def extract_reader_blocks(
     if blocks:
         return blocks
 
-    body = soup.get_text("\n", strip=True)
+    return extract_fallback_blocks(soup, source_href, poetry)
+
+
+def block_text_lines(node: Tag) -> list[str]:
+    """Read one block without treating inline markup as paragraph breaks."""
+
+    explicit_lines: list[list[str]] = [[]]
+    for descendant in node.descendants:
+        if isinstance(descendant, NavigableString):
+            explicit_lines[-1].append(str(descendant))
+        elif isinstance(descendant, Tag) and descendant.name == "br":
+            explicit_lines.append([])
+
+    raw_lines = ["".join(parts) for parts in explicit_lines]
+    if node.name == "pre":
+        raw_lines = [line for text in raw_lines for line in text.splitlines()]
+    lines = [normalize_inline_text(line) for line in raw_lines]
+    return [line for line in lines if line]
+
+
+def extract_fallback_blocks(soup: BeautifulSoup, source_href: str, poetry: bool) -> list[ReaderBlock]:
+    """Extract text from non-standard containers while retaining editable paths."""
+
     fallback: list[ReaderBlock] = []
-    for raw_line in body.splitlines():
-        line = normalize_inline_text(raw_line)
-        if line:
-            fallback.append(
-                ReaderBlock(
-                    text=line,
-                    kind="verse" if poetry else "paragraph",
-                    node=soup,
-                    source_href=source_href,
-                    node_path="",
-                    line_index=len(fallback),
-                )
+    ignored = {"html", "head", "script", "style", "noscript"}
+    for node in soup.find_all(True):
+        if node.name in ignored or node.find_parent(["head", "script", "style", "noscript"]):
+            continue
+        direct_text = "\n".join(str(child) for child in node.children if isinstance(child, NavigableString))
+        lines = [normalize_inline_text(line) for line in direct_text.splitlines()]
+        lines = [line for line in lines if line]
+        if not lines:
+            continue
+        path = tag_path(node)
+        fallback.extend(
+            ReaderBlock(
+                text=line,
+                kind="verse" if poetry else "paragraph",
+                node=node,
+                source_href=source_href,
+                node_path=path,
+                line_index=line_index,
             )
+            for line_index, line in enumerate(lines)
+        )
     return fallback
 
 

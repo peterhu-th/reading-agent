@@ -1,6 +1,6 @@
 # Reading Agent
 
-Reading Agent 是一个面向个人中文 EPUB 书库的本地 RAG 阅读助理。项目把本地书籍解析为可检索的文本片段，使用本地 embedding、关键词检索、cross-encoder reranker、摘要索引和多轮会话，为大模型提供更合适的上下文，再由对话模型生成带引用的回答。
+Reading Agent 是一个面向个人中文 EPUB 书库的本地 RAG 阅读与编辑工具。项目一方面把书籍解析为可检索的文本片段，通过 embedding、关键词检索、reranker、摘要索引和多轮会话为大模型提供上下文；另一方面提供可直接修改原文、批注、编辑目录并写回 EPUB 的 Web 阅读器。
 
 当前版本优先服务中文书库，默认通过 AIClient2API 接入 ChatGPT 兼容接口；书籍正文、向量索引、摘要索引和本地模型都保存在本机。
 
@@ -16,16 +16,21 @@ Reading Agent 是一个面向个人中文 EPUB 书库的本地 RAG 阅读助理�
 
 ## 核心能力
 
-- EPUB 解析：从 `data/raw/epub` 读取 EPUB，抽取正文段落。
-- 中文清洗：过滤目录、版权页、校注、空段、乱码等低质量内容。
+- 双数据管线：RAG 数据会清洗低质量内容，阅读器数据则尽量无损保留 EPUB 的短诗行、篇名和注释。
+- EPUB 解析：从 `data/raw/epub` 读取 EPUB，生成检索数据和完整阅读数据。
+- 中文清洗：为检索库过滤目录、版权页、校注、空段、乱码等低质量内容。
 - 分类型 chunking：小说、诗歌、哲学、史书使用不同切分策略。
 - 本地 embedding：默认支持 `BAAI/bge-base-zh-v1.5`。
 - 混合检索：向量检索 + BM25 关键词检索。
 - Cross-encoder rerank：默认支持 `BAAI/bge-reranker-base`，不可用时可回退轻量 rerank。
 - 摘要索引：离线生成章节摘要和全书摘要，用于总结、比较、人物关系等全局问题。
-- 多轮会话：CLI 内维护短期会话状态，支持 `/history` 和 `/clear`。
+- 多轮会话：CLI 和 Web 后端维护短期会话状态；CLI 支持 `/history` 和 `/clear`。
 - 按问题类型选择 prompt：总结、比较、细节、情绪推荐使用不同回答模板。
 - Web 阅读器：章节目录、正文分页、阅读进度、字体/行距/版心/主题设置和章内搜索。
+- 原文编辑：正文可像文字处理器一样直接选中、输入、长按删除，也支持跨段批量删除。
+- 批注与高亮：选中文字后可添加四色高亮和批注文字。
+- 目录编辑：可在目录中删除整章或修改章节名称，并统一纳入撤销历史。
+- 持久化保存：正文、目录和批注可写回原 EPUB、阅读器缓存与本地批注文件；保存和更新数据库互相独立。
 - 侧边阅读助理：可隐藏、可调宽度，支持当前书、当前章、全书库和选中文字四种上下文。
 - 引用回读：回答引用可以直接定位到书籍章节和原文段落。
 
@@ -40,7 +45,7 @@ reading-memory-agent/
 │  ├─ models/                # Pydantic 数据结构
 │  ├─ prompts/               # 不同问题类型的回答 prompt
 │  ├─ retrieval/             # 向量检索、BM25、混合检索、rerank、摘要检索
-│  ├─ services/              # 阅读服务、RAG 服务和模型服务健康检查
+│  ├─ services/              # 阅读、编辑、EPUB 持久化、数据库更新和 RAG 服务
 │  └─ web/                   # FastAPI 接口与前端静态文件托管
 ├─ frontend/                 # React + TypeScript + Vite 阅读器
 ├─ scripts/
@@ -49,6 +54,7 @@ reading-memory-agent/
 │  ├─ rebuild_index.py       # 重建或增量更新 chunk 向量索引
 │  ├─ build_summaries.py     # 离线生成或增量更新摘要
 │  ├─ rebuild_summary_index.py
+│  ├─ update_database.py     # 顺序更新阅读数据、检索索引和摘要索引
 │  ├─ run_cli.py             # 启动命令行阅读助理
 │  ├─ run_web.py             # 只启动 Web 阅读器
 │  ├─ run_all.py             # 启动模型网关后再启动阅读器
@@ -57,9 +63,9 @@ reading-memory-agent/
 │  ├─ inspect_chunking.py    # 抽查 chunking 质量
 │  └─ evaluate_retrieval.py  # 检索质量 smoke test
 ├─ tests/                    # 单元测试和检索流程测试
-├─ data/                     # 本地书籍、处理结果、Chroma 索引；默认不提交
-├─ models/                   # 本地 embedding/reranker 模型；默认不提交
-├─ .env.example              # 可提交的配置模板
+├─ data/                     # 本地书籍、处理结果、Chroma 索引
+├─ models/                   # 本地 embedding/reranker 模型
+├─ .env.example
 ├─ requirements.txt
 └─ requirements-embedding-gpu-cu128.txt
 ```
@@ -75,7 +81,7 @@ reading-memory-agent/
   - embedding：`BAAI/bge-base-zh-v1.5`
   - reranker：`BAAI/bge-reranker-base`
 
-最低可运行方式是 CPU + 轻量 rerank，但中文检索质量和速度会下降。
+`.env.example` 面向本地 BGE + CUDA。没有 GPU 或模型文件时，也可使用代码内置的 `local-hash` embedding 和轻量 rerank 启动；这种模式无需下载模型，但中文语义检索质量会明显下降。
 
 ## 安装依赖
 
@@ -124,13 +130,16 @@ git clone https://huggingface.co/BAAI/bge-reranker-base models/bge-reranker-base
 python scripts/check_models.py
 ```
 
-如果你暂时没有 GPU，可以在 `.env` 中改为：
+如果只需要快速启动、运行测试，或暂时没有本地模型，可以在 `.env` 中改为：
 
 ```text
+EMBEDDING_BACKEND=local-hash
 EMBEDDING_DEVICE=cpu
 RERANK_BACKEND=lightweight
 RERANK_DEVICE=cpu
 ```
+
+`local-hash` 是确定性的轻量 embedding，不等价于 BGE 语义模型。仅需把 BGE 放在 CPU 上运行时，请保留 `EMBEDDING_BACKEND=sentence-transformers`，只把 `EMBEDDING_DEVICE` 和 `RERANK_DEVICE` 改为 `cpu`。
 
 ## 配置
 
@@ -204,7 +213,7 @@ data/raw/epub/
 
 ## 复现流程
 
-从空仓库复现完整索引：
+从空仓库复现完整索引（使用 BGE 时先执行模型检查）：
 
 ```powershell
 conda activate reading-agent
@@ -220,10 +229,10 @@ python scripts/evaluate_retrieval.py
 
 每一步作用：
 
-- `check_models.py`：确认本地 embedding 和 reranker 模型存在。
+- `check_models.py`：确认本地 embedding 和 reranker 模型存在；轻量模式可跳过。
 - `ingest_books.py`：解析 EPUB，生成 `books.jsonl` 和 `chunks.jsonl`。
 - `build_reader_library.py`：按 EPUB 自带目录生成无损阅读数据，保留短诗行、篇名、注释等全部可读文本。
-- `rebuild_index.py`：构建 Chroma chunk 向量索引；会跳过内容哈希一致的 chunk。
+- `rebuild_index.py`：增量更新 Chroma chunk 向量索引。脚本先读取已有条目的 `content_hash`，跳过完全未变化的 chunk，只为新增或变化的 chunk 计算 embedding，并删除已经消失的旧条目。主要耗时通常是模型首次加载、变化 chunk 的 embedding 计算和 Chroma 批量写入；读取 JSONL、计算哈希和读取已有元数据相对较轻。只有 embedding 维度变化时才会重置集合并全量重建。
 - `build_summaries.py`：生成章节摘要和全书摘要；相同 source hash 会跳过。
 - `rebuild_summary_index.py`：构建摘要向量索引。
 - `evaluate_retrieval.py`：运行固定问题集，检查检索是否能返回合理来源。
@@ -261,7 +270,7 @@ React 依赖安装在 `frontend/node_modules`。当前 PowerShell 环境如果�
 python scripts/run_web.py
 ```
 
-`run_web.py` 会在服务就绪后自动打开 `http://127.0.0.1:8000`，但不会启动 Client2API。即使模型节点不可用，阅读器、目录、搜索和阅读进度仍可使用，聊天区会显示模型服务未就绪。
+`run_web.py` 会等待服务开始监听，然后自动打开 `http://127.0.0.1:8000`（修改 `WEB_PORT` 后会打开对应端口），但不会启动 Client2API。即使模型节点不可用，阅读器、目录、搜索、编辑和阅读进度仍可使用，聊天区会显示模型服务未就绪。
 
 需要同时尝试启动 Client2API 和 Web 阅读器时使用：
 
@@ -271,17 +280,21 @@ python scripts/run_all.py
 
 也可以在另一个终端先运行 `python scripts/start_api.py`，再运行 `python scripts/run_web.py`。浏览器访问 `http://127.0.0.1:8000`。
 
-Web 首屏是阅读器：左侧书库/目录可隐藏，中间显示完整正文，右侧聊天可隐藏并可调宽度。正文始终可以像文字处理器一样直接选中、输入和删除；跨段选择后删除会作为一次批量操作记录。选中文字会弹出工具条，可添加四色高亮和批注，也可以直接要求 AI 解释或分析选文。目录中的删除按钮可以整章删除，章节删除同样进入撤销历史，并在保存时持久化。
+Web 首屏是阅读器：左侧书库/目录可隐藏，中间显示完整正文，右侧聊天可隐藏并可调宽度。正文始终可以像文字处理器一样直接选中、输入和删除；跨段选择后删除会作为一次批量操作记录。输入期间不会因后台同步抢走当前选区或把光标移到章节开头。
+
+选中文字会弹出工具条，可添加四色高亮和批注，也可以直接要求 AI 解释或分析选文。目录中的删除按钮可以整章删除；单击铅笔或双击章节名称可进入重命名，按 `Enter` 或勾选按钮确认，按 `Esc` 取消。章节名称保存时会写入 EPUB 3 Nav 和 EPUB 2 NCX 目录；正文中原有的章节标题文字不会自动跟随更名。
 
 顶部的“撤销”“保存”“更新数据库”是三个独立操作：
 
-- “撤销”覆盖上次成功保存之后的全部正文、章节名称和批注操作，刷新浏览器不会清空；保存成功或重启服务时清空。
-- “保存”先提交当前输入，再把修改直接写回原 EPUB，同时更新阅读器缓存和批注文件；保存成功后以当前文件为新基线并清空此前撤销历史。
+- “撤销”覆盖本次服务启动后、上次成功保存之后的全部正文、章节删除、章节名称和批注操作。刷新浏览器不会清空历史；保存成功或重启服务时清空。
+- “保存”先提交当前未同步的输入，再原子替换原 EPUB，同时更新 `reader.jsonl` 和批注文件。保存成功后立即以当前内容为新基线并清空此前撤销历史；保存失败时保留未保存状态和撤销历史。
 - “更新数据库”运行完整的数据更新流程，不会自动保存当前编辑。存在未保存修改时，界面会明确提示本次更新不包含这些内容；任务完成后重启 Web 服务即可载入新书目。
 
-阅读位置和显示偏好保存在浏览器本地，会话保存在后端内存中，后端重启后会话清空。回答引用可以跳回对应章节。
+阅读位置和显示偏好保存在浏览器本地，会话与编辑撤销历史保存在后端内存中，后端重启后会清空。批注持久化到 `data/user/annotations.json`。回答引用可以跳回对应章节。
 
-新增、替换 EPUB 后，可运行 `python scripts/update_database.py` 完整更新检索库、摘要库和阅读器书库；脚本会自动调用 `ingest_books.py` 与 `build_reader_library.py`。前者生成用于 RAG 的清洗数据，后者生成用于阅读器的完整文本；二者刻意分离，避免检索清洗误删诗行或篇名。
+新增、替换 EPUB 后，可点击“更新数据库”，或运行 `python scripts/update_database.py`，完整更新检索库、摘要库和阅读器书库。脚本会自动调用 `ingest_books.py` 与 `build_reader_library.py`：前者生成用于 RAG 的清洗数据，后者生成用于阅读器的完整文本；二者刻意分离，避免检索清洗误删诗行或篇名。Web 服务启动时会从当前 `reader.jsonl` 载入书库，因此数据库更新完成后需要重启服务，新书目才会出现在前端。
+
+注意：更新数据库读取的是磁盘上的 EPUB，不会包含尚未点击“保存”的正文或目录修改。需要让本次编辑进入检索库时，应先保存，再更新数据库。
 
 前端开发模式：
 
@@ -335,8 +348,18 @@ python scripts/inspect_chunking.py --sample 1 --full
 
 ## 测试
 
+后端测试：
+
 ```powershell
 python -m pytest -q
+```
+
+前端单元测试和生产构建：
+
+```powershell
+cd frontend
+npm.cmd test -- --run
+npm.cmd run build
 ```
 
 当前测试覆盖：
@@ -352,8 +375,11 @@ python -m pytest -q
 - 摘要缓存和摘要索引
 - 多轮会话状态
 - 阅读器正文过滤、章节分页和段落定位
+- EPUB 正文写回、批量删除、批注持久化和保存后基线更新
+- 章节删除、章节重命名及 EPUB 目录更新
+- 编辑期间的选区、光标和连续退格稳定性
 - Web API 不泄露 EPUB 本地路径
-- 前端 SSE 解析、状态反馈和生产构建
+- 前端 SSE 解析、编辑状态反馈、书库目录交互和生产构建
 
 ## 隐私和开源注意事项
 
@@ -385,4 +411,6 @@ git status --short
 - 书籍类型识别目前基于书名规则，不是自动分类器。
 - AIClient2API 只负责本地测试接入；生产环境应改为正式 API 网关或官方 API。
 - 摘要默认是抽取式摘要，成本低但表达能力弱于 LLM 摘要。
+- 章节重命名只修改 EPUB 目录项，不自动改写正文中的标题节点。
+- 数据库更新完成后需要重启 Web 服务，当前进程不会热加载新的阅读器书库。
 - RAG 的核心智能仍来自回答模型；embedding、retrieval、rerank 负责提供更合适的上下文，不能替代大模型推理。

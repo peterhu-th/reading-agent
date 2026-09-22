@@ -88,14 +88,13 @@ class EpubEditorService:
     ) -> None:
         by_document: dict[str, dict[str, list[ReaderContentRecord]]] = defaultdict(lambda: defaultdict(list))
         for record in records:
-            if not record.source_node_path:
-                raise EpubEditError("该段落缺少 EPUB 节点定位，请先重新生成阅读数据。")
             by_document[record.source_href][record.source_node_path].append(record)
 
         with ZipFile(BytesIO(baseline), "r") as source:
             archive_names = {normalize_href(info.filename): info.filename for info in source.infolist()}
             replacements: dict[str, bytes] = {}
             for source_href, nodes in by_document.items():
+                legacy_document_records = nodes.pop("", [])
                 normalized = normalize_href(source_href)
                 archive_name = archive_names.get(normalized) or next(
                     (original for candidate, original in archive_names.items() if candidate.endswith("/" + normalized)),
@@ -110,6 +109,8 @@ class EpubEditorService:
                     if node is None:
                         raise EpubEditError(f"EPUB 正文节点已经变化：{source_href}#{path}")
                     resolved_nodes.append((node, node_lines))
+
+                apply_legacy_document_records(soup, legacy_document_records, deleted)
 
                 # Resolve every source path before mutating the tree. Removing an
                 # earlier sibling changes the numeric paths of all later nodes.
@@ -173,6 +174,23 @@ class EpubEditorService:
                         changed = True
             if changed:
                 replacements[info.filename] = str(soup).encode("utf-8")
+
+
+def apply_legacy_document_records(
+    soup: BeautifulSoup,
+    records: list[ReaderContentRecord],
+    deleted: set[str],
+) -> None:
+    """Support whole-page deletion for reader data created before fallback paths existed."""
+
+    if not records:
+        return
+    if any(reader_edit_id(record) not in deleted for record in records):
+        raise EpubEditError("该段落使用旧版 EPUB 节点定位，请重新生成阅读数据后再编辑单个段落。")
+    body = soup.body
+    if body is None:
+        raise EpubEditError("EPUB 正文页面缺少 body 节点，无法删除该章节。")
+    body.clear()
 
 
 def normalize_href(value: str) -> str:
