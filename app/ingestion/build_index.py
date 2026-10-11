@@ -77,28 +77,68 @@ def rebuild_index_with_stats(
 ) -> IndexBuildStats:
     settings = get_settings()
     chunks = load_chunks(chunks_path or settings.CHUNKS_JSONL_PATH)
-    if not chunks:
-        return IndexBuildStats(total_chunks=0, indexed_chunks=0, skipped_chunks=0, deleted_chunks=0)
-
     ids = [chunk.chunk_id for chunk in chunks]
     documents = [chunk_to_document(chunk) for chunk in chunks]
-    vectorstore = make_vectorstore(
+    return sync_index_documents(
+        documents,
+        ids,
         settings.CHROMA_COLLECTION,
         settings.VECTOR_DB_PATH,
-        with_embeddings=False,
+        progress,
+        reuse_unchanged=True,
     )
 
-    existing_hashes = load_existing_hashes(vectorstore, progress)
+
+def embedding_index_config() -> dict[str, str | bool]:
+    """Describe the embedding space independently of batching and hardware."""
+    settings = get_settings()
+    backend = settings.EMBEDDING_BACKEND.strip().lower().replace("_", "-")
+    return {
+        "embedding_backend": backend,
+        "embedding_model": "local-hash" if backend == "local-hash" else settings.EMBEDDING_MODEL,
+        "embedding_normalize": True,
+    }
+
+
+def sync_index_documents(
+    documents: list[Document],
+    ids: list[str],
+    collection_name: str,
+    persist_directory: str,
+    progress: ProgressCallback | None = None,
+    *,
+    reuse_unchanged: bool = False,
+) -> IndexBuildStats:
+    """Synchronize one complete source inventory with its embedding collection.
+
+    Only chunk documents opt into metadata comparison: their existing content_hash
+    includes the source text. Summary documents are always updated.
+    """
+    vectorstore = make_vectorstore(
+        collection_name,
+        persist_directory,
+        with_embeddings=False,
+    )
+    emit(progress, "Reading existing Chroma metadata...")
+    raw = vectorstore.get(include=["metadatas"])
+    existing = dict(zip(raw["ids"], raw["metadatas"], strict=True))
     current_ids = set(ids)
-    stale_ids = [chunk_id for chunk_id in existing_hashes if chunk_id not in current_ids]
-    if stale_ids:
-        emit(progress, f"Deleting {len(stale_ids)} stale chunks from Chroma...")
+    stale_ids = [document_id for document_id in existing if document_id not in current_ids]
+
+    expected_config = embedding_index_config()
+    collection_metadata = vectorstore._collection.metadata or {}
+    reset = any(collection_metadata.get(key) != value for key, value in expected_config.items())
+    if reset:
+        emit(progress, "Embedding configuration changed or missing; rebuilding Chroma collection...")
+        vectorstore.reset_collection()
+    elif stale_ids:
+        emit(progress, f"Deleting {len(stale_ids)} stale records from Chroma...")
         vectorstore.delete(ids=stale_ids)
 
     changed_documents: list[Document] = []
     changed_ids: list[str] = []
     for chunk_id, document in zip(ids, documents, strict=True):
-        if existing_hashes.get(chunk_id) == document.metadata.get("content_hash"):
+        if reuse_unchanged and not reset and existing.get(chunk_id) == document.metadata:
             continue
         changed_ids.append(chunk_id)
         changed_documents.append(document)
@@ -106,35 +146,24 @@ def rebuild_index_with_stats(
     skipped = len(documents) - len(changed_documents)
     emit(
         progress,
-        f"Chunks: total={len(documents)}, changed={len(changed_documents)}, skipped={skipped}.",
+        f"Records: total={len(documents)}, changed={len(changed_documents)}, skipped={skipped}.",
     )
 
     if changed_documents:
-        vectorstore = make_vectorstore(settings.CHROMA_COLLECTION, settings.VECTOR_DB_PATH)
-        try:
-            add_documents_in_batches(vectorstore, changed_documents, changed_ids, progress)
-        except Exception as exc:
-            if "expecting embedding with dimension" not in str(exc):
-                raise
-            emit(progress, "Embedding dimension changed; resetting Chroma collection...")
-            reset_collection(vectorstore, settings.CHROMA_COLLECTION)
-            vectorstore = make_vectorstore(settings.CHROMA_COLLECTION, settings.VECTOR_DB_PATH)
-            add_documents_in_batches(vectorstore, documents, ids, progress)
-            return IndexBuildStats(
-                total_chunks=len(documents),
-                indexed_chunks=len(documents),
-                skipped_chunks=0,
-                deleted_chunks=len(stale_ids),
-                reset_collection=True,
-            )
+        vectorstore = make_vectorstore(collection_name, persist_directory)
+        add_documents_in_batches(vectorstore, changed_documents, changed_ids, progress)
     else:
-        emit(progress, "No changed chunks to index.")
+        emit(progress, "No changed records to index.")
+
+    # Mark the embedding space only after a complete successful rebuild.
+    vectorstore._collection.modify(metadata={**collection_metadata, **expected_config})
 
     return IndexBuildStats(
         total_chunks=len(documents),
         indexed_chunks=len(changed_documents),
         skipped_chunks=skipped,
         deleted_chunks=len(stale_ids),
+        reset_collection=reset,
     )
 
 
@@ -149,27 +178,6 @@ def make_vectorstore(
         embedding_function=make_embeddings() if with_embeddings else None,
         persist_directory=persist_directory,
     )
-
-
-def load_existing_hashes(
-    vectorstore: Chroma,
-    progress: ProgressCallback | None = None,
-) -> dict[str, str]:
-    emit(progress, "Reading existing Chroma metadata...")
-    try:
-        raw = vectorstore.get(include=["metadatas"])
-    except Exception:
-        return {}
-
-    ids = raw.get("ids") or []
-    metadatas = raw.get("metadatas") or []
-    hashes: dict[str, str] = {}
-    for chunk_id, metadata in zip(ids, metadatas, strict=False):
-        if isinstance(metadata, dict):
-            content_hash = metadata.get("content_hash")
-            if isinstance(content_hash, str) and content_hash:
-                hashes[str(chunk_id)] = content_hash
-    return hashes
 
 
 def add_documents_in_batches(
@@ -190,13 +198,6 @@ def add_documents_in_batches(
             documents=documents[start:end],
             ids=ids[start:end],
         )
-
-
-def reset_collection(vectorstore: Chroma, collection_name: str) -> None:
-    try:
-        vectorstore._client.delete_collection(collection_name)
-    except Exception:
-        pass
 
 
 def emit(progress: ProgressCallback | None, message: str) -> None:

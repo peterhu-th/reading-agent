@@ -62,12 +62,12 @@ def chroma_where(metadata_filter: dict[str, MetadataValue] | None) -> dict[str, 
     conditions: list[dict[str, Any]] = []
     for key, value in metadata_filter.items():
         if isinstance(value, list):
-            values = [item for item in value if item]
+            values = [item for item in value if item is not None and item != ""]
             if len(values) == 1:
                 conditions.append({key: values[0]})
             elif len(values) > 1:
                 conditions.append({"$or": [{key: item} for item in values]})
-        elif value:
+        elif value is not None and value != "":
             conditions.append({key: value})
 
     if not conditions:

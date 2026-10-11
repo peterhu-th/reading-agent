@@ -47,6 +47,12 @@ class ReaderService:
         for name in ("records", "chapters", "books", "book_by_id"):
             self.__dict__.pop(name, None)
 
+    def replace_records(self, records: list[ReaderContentRecord]) -> None:
+        """Install a successfully saved reader snapshot and discard derived views."""
+
+        self.reload()
+        self.__dict__["records"] = records
+
     def invalidate_effective(self) -> None:
         for name in ("books", "book_by_id"):
             self.__dict__.pop(name, None)

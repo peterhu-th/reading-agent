@@ -12,19 +12,32 @@ export interface TextSelection {
   endOffset: number;
 }
 
+export interface ReaderEditTarget {
+  bookId: string;
+  chapterIndex: number;
+}
+
+interface EditableChapter {
+  target: ReaderEditTarget;
+  paragraphs: ReaderParagraph[];
+  submit: Props["onEdit"];
+  pending: Promise<void> | null;
+}
+
 interface Props {
   book: ReaderBook | null;
   page: ReaderPage | null;
   paragraphs: ReaderParagraph[];
   preferences: ReaderPreferences;
   loading: boolean;
+  readOnly?: boolean;
   contentRevision: number;
   highlightParagraph: number | null;
   onChapter: (chapter: number) => void;
   onLoadMore: () => void;
   onProgress: (paragraph: number, progress: number) => void;
   onAskSelection: (selection: TextSelection, prompt: string) => void;
-  onEdit: (mutations: ReaderMutation[], label: string) => Promise<void>;
+  onEdit: (target: ReaderEditTarget, mutations: ReaderMutation[], label: string) => Promise<void>;
   onAnnotate: (selection: TextSelection, color: AnnotationColor, comment: string) => Promise<void>;
   onUndo: () => Promise<void>;
 }
@@ -35,18 +48,27 @@ export interface ReaderViewHandle {
 
 type FloatingSelection = TextSelection & { x: number; y: number };
 
-export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderView({ book, page, paragraphs, preferences, loading, contentRevision, highlightParagraph, onChapter, onLoadMore, onProgress, onAskSelection, onEdit, onAnnotate, onUndo }, ref) {
+export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderView({ book, page, paragraphs, preferences, loading, readOnly = false, contentRevision, highlightParagraph, onChapter, onLoadMore, onProgress, onAskSelection, onEdit, onAnnotate, onUndo }, ref) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const commitTimer = useRef<number | null>(null);
+  const editableChapter = useRef<EditableChapter | null>(null);
   const [selection, setSelection] = useState<FloatingSelection | null>(null);
   const [comment, setComment] = useState("");
 
   useLayoutEffect(() => {
+    cancelEditorCommit();
     const container = contentRef.current;
     if (container) container.innerHTML = renderEditableHtml(paragraphs);
-  }, [contentRevision]);
+    editableChapter.current = page ? {
+      target: { bookId: page.book.book_id, chapterIndex: page.chapter.chapter_index },
+      paragraphs,
+      submit: onEdit,
+      pending: null,
+    } : null;
+    setSelection(null);
+  }, [contentRevision, page?.book.book_id, page?.chapter.chapter_index]);
 
   useEffect(() => {
     const container = contentRef.current;
@@ -71,13 +93,11 @@ export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderVie
     return () => observer.disconnect();
   }, [loading, page?.next_offset, onLoadMore]);
   useEffect(() => () => {
-    if (commitTimer.current) window.clearTimeout(commitTimer.current);
+    cancelEditorCommit();
+    editableChapter.current = null;
   }, []);
   useImperativeHandle(ref, () => ({
-    flush: async () => {
-      if (commitTimer.current) window.clearTimeout(commitTimer.current);
-      await commitEditorChanges();
-    },
+    flush: commitEditorChanges,
   }));
 
   function captureSelection() {
@@ -111,28 +131,53 @@ export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderVie
 
   function scheduleEditorCommit() {
     setSelection(null);
-    if (commitTimer.current) window.clearTimeout(commitTimer.current);
-    commitTimer.current = window.setTimeout(() => { void commitEditorChanges(); }, 650);
+    cancelEditorCommit();
+    const chapter = editableChapter.current;
+    commitTimer.current = window.setTimeout(() => {
+      if (chapter === editableChapter.current) void commitEditorChanges().catch(() => undefined);
+    }, 650);
   }
 
-  async function commitEditorChanges() {
+  function cancelEditorCommit() {
+    if (commitTimer.current !== null) window.clearTimeout(commitTimer.current);
     commitTimer.current = null;
-    const container = contentRef.current;
-    if (!container) return;
-    const elements = new Map(
-      Array.from(container.querySelectorAll<HTMLElement>("[data-edit-id]")).map((element) => [element.dataset.editId ?? "", element]),
-    );
-    const mutations: ReaderMutation[] = [];
-    for (const paragraph of paragraphs) {
-      const element = elements.get(paragraph.edit_id);
-      const text = cleanEditableText(element?.innerText ?? "");
-      if (!element || !text) mutations.push({ edit_id: paragraph.edit_id, text: "", deleted: true });
-      else if (text !== paragraph.text) mutations.push({ edit_id: paragraph.edit_id, text, deleted: false });
+  }
+
+  function commitEditorChanges(): Promise<void> {
+    cancelEditorCommit();
+    const chapter = editableChapter.current;
+    if (!chapter) return Promise.resolve();
+    if (chapter.pending) return chapter.pending;
+    // A flush drains edits made while a previous operation was in flight too.
+    // The chapter identity prevents an old callback from reading a new chapter's DOM.
+    chapter.pending = submitChanges(chapter).finally(() => { chapter.pending = null; });
+    return chapter.pending;
+  }
+
+  async function submitChanges(chapter: EditableChapter) {
+    while (chapter === editableChapter.current) {
+      const container = contentRef.current;
+      if (!container) return;
+      const elements = new Map(
+        Array.from(container.querySelectorAll<HTMLElement>("[data-edit-id]")).map((element) => [element.dataset.editId ?? "", element]),
+      );
+      const mutations: ReaderMutation[] = [];
+      for (const paragraph of chapter.paragraphs) {
+        const element = elements.get(paragraph.edit_id);
+        const text = cleanEditableText(element?.innerText ?? "");
+        if (!element || !text) mutations.push({ edit_id: paragraph.edit_id, text: "", deleted: true });
+        else if (text !== paragraph.text) mutations.push({ edit_id: paragraph.edit_id, text, deleted: false });
+      }
+      if (!mutations.length) return;
+      const deletedCount = mutations.filter((item) => item.deleted).length;
+      const label = deletedCount > 1 ? `删除 ${deletedCount} 个段落` : deletedCount === 1 ? "删除段落" : "编辑正文";
+      await chapter.submit(chapter.target, mutations, label);
+      const byId = new Map(mutations.map((item) => [item.edit_id, item]));
+      chapter.paragraphs = chapter.paragraphs.flatMap((paragraph) => {
+        const mutation = byId.get(paragraph.edit_id);
+        return !mutation ? [paragraph] : mutation.deleted ? [] : [{ ...paragraph, text: mutation.text }];
+      });
     }
-    if (!mutations.length) return;
-    const deletedCount = mutations.filter((item) => item.deleted).length;
-    const label = deletedCount > 1 ? `删除 ${deletedCount} 个段落` : deletedCount === 1 ? "删除段落" : "编辑正文";
-    await onEdit(mutations, label);
   }
 
   function trackProgress() {
@@ -148,7 +193,7 @@ export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderVie
 
   async function addAnnotation(color: AnnotationColor) {
     if (!selection) return;
-    await commitEditorChanges();
+    try { await commitEditorChanges(); } catch { return; }
     await onAnnotate(selection, color, comment.trim());
     setSelection(null);
     setComment("");
@@ -169,7 +214,7 @@ export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderVie
         <header className="chapter-header" contentEditable={false}>
           <span>{book.title}</span><h1>{page?.chapter.chapter_title ?? "正在载入章节"}</h1><p>{book.author || "作者未知"}</p>
         </header>
-        <div className="reader-editable-content" contentEditable suppressContentEditableWarning spellCheck={false} ref={contentRef} onInput={scheduleEditorCommit} onKeyDown={(event) => { void handleEditorKeyDown(event); }} onKeyUp={captureSelection} />
+        <div className="reader-editable-content" contentEditable={!loading && !readOnly} suppressContentEditableWarning spellCheck={false} ref={contentRef} onInput={scheduleEditorCommit} onKeyDown={(event) => { void handleEditorKeyDown(event); }} onKeyUp={captureSelection} />
         {loading && <div className="reader-loading" contentEditable={false}><LoaderCircle />正在载入正文</div>}
         {!loading && page?.next_offset !== null && <div className="load-more-sentinel" ref={loadMoreRef} contentEditable={false}>继续载入本章</div>}
         {page && <nav className="chapter-navigation" contentEditable={false}><button disabled={page.previous_chapter_index === null} onClick={() => page.previous_chapter_index !== null && onChapter(page.previous_chapter_index)}><ArrowLeft />上一章</button><button disabled={page.next_chapter_index === null} onClick={() => page.next_chapter_index !== null && onChapter(page.next_chapter_index)}>下一章<ArrowRight /></button></nav>}

@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from app.models.schemas import (
@@ -9,6 +11,8 @@ from app.models.schemas import (
     ReaderBook,
     ReaderChapter,
     RetrievedChunk,
+    ResolvedQuestion,
+    SelectedPassage,
     TextChunk,
 )
 from app.services.reading_assistant import PreparedTurn
@@ -136,3 +140,59 @@ def test_safe_error_message_hides_internal_path():
     message = web_api.safe_error_message(RuntimeError("failed at D:/private/models/config.json"))
     assert "D:/" not in message
     assert "config.json" not in message
+
+
+def test_stream_forwards_selected_passage_to_answer_generation(monkeypatch):
+    session = web_api.service.create_session()
+    selection = SelectedPassage(text="没有进入索引的选文", book_title="测试书", chapter_index=0, paragraph_indices=[2])
+    prepared = PreparedTurn(
+        session,
+        ResolvedQuestion(original_question="解释选文", standalone_question="解释选文"),
+        IterativeRetrievalResult(intent=IntentAnalysis(question="解释选文"), plan=RetrievalPlan(), assessment=EvidenceAssessment()),
+        selection=selection,
+    )
+    received = []
+
+    async def fake_stream(*_args, **kwargs):
+        received.append(kwargs.get("selection"))
+        yield "选文解释"
+
+    monkeypatch.setattr(web_api.service, "prepare_turn", lambda *_args: prepared)
+    monkeypatch.setattr(web_api.service, "finalize_turn", lambda *_args: session)
+    monkeypatch.setattr(web_api, "stream_answer", fake_stream)
+
+    response = client.post("/api/chat/stream", json={"session_id": session.session_id, "question": "解释选文", "selected_text": selection.text})
+
+    assert response.status_code == 200
+    assert "选文解释" in response.text
+    assert received == [selection]
+
+
+def test_citations_keep_source_coordinates_when_text_occurs_in_multiple_chapters(monkeypatch):
+    session = web_api.service.create_session()
+    retrieved = make_chunk()
+    retrieved.chunk.chapter_index = 2
+    retrieved.chunk.start_paragraph_index = 5
+    retrieved.chunk.end_paragraph_index = 8
+    prepared = PreparedTurn(
+        session,
+        ResolvedQuestion(original_question="问题", standalone_question="问题"),
+        IterativeRetrievalResult(chunks=[retrieved], intent=IntentAnalysis(question="问题"), plan=RetrievalPlan(), assessment=EvidenceAssessment(sufficient=True)),
+    )
+
+    async def fake_stream(*_args, **_kwargs):
+        yield "回答[1]"
+
+    def ambiguous_text_lookup(*_args):
+        raise AssertionError("Precise source coordinates must not be replaced by a first-text-match lookup")
+
+    monkeypatch.setattr(web_api.service, "prepare_turn", lambda *_args: prepared)
+    monkeypatch.setattr(web_api.service, "finalize_turn", lambda *_args: session)
+    monkeypatch.setattr(web_api, "stream_answer", fake_stream)
+    monkeypatch.setattr(web_api.reader, "locate", ambiguous_text_lookup)
+    response = client.post("/api/chat/stream", json={"session_id": session.session_id, "question": "问题"})
+
+    events = response.text.split("\n\n")
+    payload = next(event.split("data: ", 1)[1] for event in events if event.startswith("event: citations"))
+    location = json.loads(payload)["items"][0]["reader_location"]
+    assert location == {"book_id": "book", "chapter_index": 2, "start_paragraph_index": 5, "end_paragraph_index": 8}

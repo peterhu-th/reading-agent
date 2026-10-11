@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from ebooklib import epub
 
 from app.ingestion.chunking import infer_book_type
-from app.ingestion.load_epub import (
+from app.ingestion.epub_source import (
     clean_book_title,
     extract_html_documents,
     extract_metadata,
@@ -239,9 +239,7 @@ def tag_path(node: Tag) -> str:
     while getattr(current, "parent", None) is not None:
         parent = current.parent
         siblings = [child for child in parent.children if isinstance(child, Tag)]
-        if current not in siblings:
-            break
-        parts.append(str(siblings.index(current)))
+        parts.append(str(next(index for index, sibling in enumerate(siblings) if sibling is current)))
         current = parent
         if isinstance(current, BeautifulSoup):
             break

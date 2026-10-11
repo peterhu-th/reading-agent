@@ -320,6 +320,7 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                 prepared.retrieval.chunks,
                 prepared.retrieval.intent,
                 prepared.session,
+                selection=prepared.selection,
             ):
                 if await request.is_disconnected():
                     cancelled.set()
@@ -328,15 +329,6 @@ async def chat_stream(payload: ChatRequest, request: Request) -> StreamingRespon
                 yield sse("answer_delta", {"text": delta})
 
             citations = build_citations(prepared.retrieval.chunks)
-            citations = [
-                citation.model_copy(
-                    update={
-                        "reader_location": reader.locate(item.chunk.book_id, item.chunk.text)
-                        or citation.reader_location
-                    }
-                )
-                for citation, item in zip(citations, prepared.retrieval.chunks, strict=True)
-            ]
             answer = AnswerWithCitations(answer="".join(answer_parts).strip(), citations=citations)
             updated = await asyncio.to_thread(service.finalize_turn, prepared, answer)
             yield sse("citations", {"items": [item.model_dump(mode="json") for item in citations]})

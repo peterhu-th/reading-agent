@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from threading import RLock
 
 from app.config import get_settings
@@ -15,7 +16,7 @@ from app.models.schemas import (
     ReaderOperationRequest,
     utc_now_iso,
 )
-from app.services.epub_editor import EpubEditorService
+from app.services.epub_editor import EpubEditorService, replace_saved_files
 from app.services.reader import ReaderService, reader_edit_id
 
 
@@ -272,11 +273,43 @@ class EditorSessionService:
     def save(self) -> EditorState:
         with self._lock:
             self._ensure_base()
-            self.epub_editor.save(self.reader.records, self._texts, self._deleted, self._chapter_titles)
-            self._write_reader_jsonl()
-            self._write_annotations()
-            self._saved_signature = self._signature()
+            with self.epub_editor.prepare(self.reader.records, self._texts, self._deleted, self._chapter_titles) as prepared:
+                annotations: list[ReaderAnnotation] = []
+                for annotation in self._annotations:
+                    start = prepared.records_by_previous_id.get(annotation.start_edit_id)
+                    end = prepared.records_by_previous_id.get(annotation.end_edit_id)
+                    if start is None or end is None:
+                        annotations.append(annotation)
+                        continue
+                    annotations.append(annotation.model_copy(update={
+                        "book_id": start.book_id,
+                        "chapter_index": start.chapter_index,
+                        "start_edit_id": reader_edit_id(start),
+                        "end_edit_id": reader_edit_id(end),
+                    }))
+                temporary_files: list[Path] = []
+                try:
+                    reader_temporary = self._write_reader_jsonl(prepared.records)
+                    temporary_files.append(reader_temporary)
+                    annotations_temporary = self._write_annotations(annotations)
+                    temporary_files.append(annotations_temporary)
+                    replace_saved_files({
+                        **prepared.files,
+                        self.reader.reader_path: reader_temporary,
+                        self.annotation_path: annotations_temporary,
+                    })
+                finally:
+                    for temporary in temporary_files:
+                        temporary.unlink(missing_ok=True)
+                saved_records = prepared.records
+            self.reader.replace_records(saved_records)
+            self._texts.clear()
+            self._deleted.clear()
+            self._chapter_titles.clear()
+            self._annotations = annotations
             self._undo.clear()
+            self.rebase()
+            self._saved_signature = self._signature()
             return self.state()
 
     def state(self) -> EditorState:
@@ -298,15 +331,19 @@ class EditorSessionService:
             self._annotations = self._load_annotations()
             self._saved_signature = self._signature()
 
-    def _write_reader_jsonl(self) -> None:
+    def _write_reader_jsonl(self, records: list[ReaderContentRecord]) -> Path:
         output = self.reader.reader_path
         output.parent.mkdir(parents=True, exist_ok=True)
-        temporary = output.with_suffix(output.suffix + ".tmp")
-        effective = self.apply_records(self.reader.records)
-        with temporary.open("w", encoding="utf-8") as file:
-            for record in effective:
-                file.write(json.dumps(record.model_dump(mode="json"), ensure_ascii=False) + "\n")
-        temporary.replace(output)
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent, prefix=f".{output.name}.", suffix=".tmp", delete=False) as file:
+            temporary = Path(file.name)
+            try:
+                for record in records:
+                    file.write(json.dumps(record.model_dump(mode="json"), ensure_ascii=False) + "\n")
+            except Exception:
+                file.close()
+                temporary.unlink(missing_ok=True)
+                raise
+        return temporary
 
     def _load_annotations(self) -> list[ReaderAnnotation]:
         if not self.annotation_path.exists():
@@ -314,14 +351,17 @@ class EditorSessionService:
         data = json.loads(self.annotation_path.read_text(encoding="utf-8"))
         return [ReaderAnnotation(**item) for item in data]
 
-    def _write_annotations(self) -> None:
+    def _write_annotations(self, annotations: list[ReaderAnnotation]) -> Path:
         self.annotation_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.annotation_path.with_suffix(self.annotation_path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps([item.model_dump(mode="json") for item in self._annotations], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        temporary.replace(self.annotation_path)
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.annotation_path.parent, prefix=f".{self.annotation_path.name}.", suffix=".tmp", delete=False) as file:
+            temporary = Path(file.name)
+            try:
+                json.dump([item.model_dump(mode="json") for item in annotations], file, ensure_ascii=False, indent=2)
+            except Exception:
+                file.close()
+                temporary.unlink(missing_ok=True)
+                raise
+        return temporary
 
     def _signature(self) -> str:
         payload = {
@@ -367,16 +407,17 @@ class EditorSessionService:
             if annotation.annotation_id not in affected_ids:
                 updated.append(annotation)
                 continue
-            start = shift(annotation.start_offset) if annotation.start_edit_id == edit_id else annotation.start_offset
-            end = shift(annotation.end_offset) if annotation.end_edit_id == edit_id else annotation.end_offset
+            start = min(shift(annotation.start_offset), len(new_text)) if annotation.start_edit_id == edit_id else annotation.start_offset
+            end = min(shift(annotation.end_offset), len(new_text)) if annotation.end_edit_id == edit_id else annotation.end_offset
             selected_text = annotation.selected_text
             if annotation.start_edit_id == edit_id == annotation.end_edit_id:
+                end = max(start, end)
                 selected_text = new_text[start:end]
             updated.append(
                 annotation.model_copy(
                     update={
-                        "start_offset": min(start, len(new_text)),
-                        "end_offset": min(max(start, end), len(new_text)),
+                        "start_offset": start,
+                        "end_offset": end,
                         "selected_text": selected_text,
                         "updated_at": utc_now_iso(),
                     }

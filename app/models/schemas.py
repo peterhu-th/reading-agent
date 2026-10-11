@@ -171,6 +171,15 @@ class AnswerWithCitations(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
 
 
+class SelectedPassage(BaseModel):
+    """Reader text supplied by the user, independent of indexed evidence."""
+
+    text: str = Field(min_length=1)
+    book_title: str = ""
+    chapter_index: int | None = None
+    paragraph_indices: list[int] = Field(default_factory=list)
+
+
 class ConversationTurn(BaseModel):
     """One completed user-assistant exchange kept in a runtime session."""
 

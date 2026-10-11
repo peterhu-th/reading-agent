@@ -9,8 +9,7 @@ from app.config import get_settings
 from app.memory.conversation_memory import maybe_compact_conversation, update_conversation
 from app.memory.conversation_resolver import resolve_question
 from app.memory.session_store import SessionStore
-from app.models.schemas import AnswerWithCitations, BookSummary, ConversationSession, IterativeRetrievalResult, ResolvedQuestion, TextChunk
-from app.retrieval.hybrid_retriever import EnhancedRetriever
+from app.models.schemas import AnswerWithCitations, BookSummary, ConversationSession, IterativeRetrievalResult, ResolvedQuestion, SelectedPassage, TextChunk
 from app.retrieval.iterative_retriever import IterativeRetriever, StatusCallback
 from app.retrieval.vector_retriever import MetadataValue
 
@@ -20,6 +19,7 @@ class PreparedTurn:
     session: ConversationSession
     resolved: ResolvedQuestion
     retrieval: IterativeRetrievalResult | None = None
+    selection: SelectedPassage | None = None
 
 
 class ReadingAssistantService:
@@ -72,12 +72,18 @@ class ReadingAssistantService:
         selected = list(dict.fromkeys(selected_books or ([book_title] if book_title and scope != "library" else [])))
         session = session.model_copy(update={"explicit_book_titles": selected})
         self.store.save(session)
+        selection = SelectedPassage(
+            text=selected_text.strip(),
+            book_title=book_title,
+            chapter_index=chapter_index,
+            paragraph_indices=selected_paragraphs or [],
+        ) if selected_text.strip() else None
         retrieval_question = question
-        if selected_text.strip():
-            retrieval_question = f"用户选中的原文：{selected_text.strip()}\n用户问题：{question}"
+        if selection:
+            retrieval_question = f"用户选中的原文：{selection.text}\n用户问题：{question}"
         resolved = resolve_question(retrieval_question, session, selected)
         if resolved.clarification_needed:
-            return PreparedTurn(session=session, resolved=resolved)
+            return PreparedTurn(session=session, resolved=resolved, selection=selection)
         metadata_filter: dict[str, MetadataValue] = {}
         if scope in {"book", "chapter"} and book_id:
             metadata_filter["book_id"] = book_id
@@ -85,12 +91,12 @@ class ReadingAssistantService:
             metadata_filter["chapter_index"] = chapter_index
         retrieval = self.iterative.search(resolved.standalone_question, session, debug, status_callback, metadata_filter or None)
         resolved = resolved.model_copy(update={"original_question": question})
-        return PreparedTurn(session=session, resolved=resolved, retrieval=retrieval)
+        return PreparedTurn(session=session, resolved=resolved, retrieval=retrieval, selection=selection)
 
     def generate(self, prepared: PreparedTurn) -> AnswerWithCitations:
         if prepared.retrieval is None:
             raise ValueError("Cannot generate an answer before retrieval")
-        return generate_answer(prepared.resolved.original_question, prepared.retrieval.chunks, prepared.retrieval.intent, prepared.session)
+        return generate_answer(prepared.resolved.original_question, prepared.retrieval.chunks, prepared.retrieval.intent, prepared.session, selection=prepared.selection)
 
     def finalize_turn(self, prepared: PreparedTurn, answer: AnswerWithCitations) -> ConversationSession:
         if prepared.retrieval is None:

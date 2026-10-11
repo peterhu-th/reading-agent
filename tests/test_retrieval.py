@@ -27,3 +27,15 @@ def test_embedding_factory_supports_local_hash(monkeypatch):
     assert isinstance(make_embeddings(), LocalHashEmbeddings)
 
     get_settings.cache_clear()
+
+
+def test_chroma_where_preserves_zero_chapter_and_chunk_indexes():
+    from app.retrieval.vector_retriever import chroma_where
+
+    assert chroma_where({"book_id": "book", "chapter_index": 0}) == {
+        "$and": [{"book_id": "book"}, {"chapter_index": 0}]
+    }
+    assert chroma_where({"chapter_index": [0, 1]}) == {
+        "$or": [{"chapter_index": 0}, {"chapter_index": 1}]
+    }
+    assert chroma_where({"chunk_index": [0], "title": ""}) == {"chunk_index": 0}

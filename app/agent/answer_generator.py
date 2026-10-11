@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI
 from app.agent.answer_strategy import choose_answer_strategy
 from app.agent.citation_builder import build_citations, build_context
 from app.config import get_settings
-from app.models.schemas import AnswerStrategy, AnswerWithCitations, ConversationSession, IntentAnalysis, RetrievedChunk
+from app.models.schemas import AnswerStrategy, AnswerWithCitations, ConversationSession, IntentAnalysis, RetrievedChunk, SelectedPassage
 
 
 PROMPT_BY_STRATEGY = {
@@ -23,11 +23,25 @@ def load_prompt(strategy_name: str) -> str:
     return PROMPT_BY_STRATEGY.get(strategy_name, PROMPT_BY_STRATEGY["explain"]).read_text(encoding="utf-8")
 
 
-def build_answer_prompt(question: str, retrieved: list[RetrievedChunk], intent: IntentAnalysis | None = None, conversation: ConversationSession | None = None, strategy: AnswerStrategy | None = None) -> str:
+def build_answer_prompt(question: str, retrieved: list[RetrievedChunk], intent: IntentAnalysis | None = None, conversation: ConversationSession | None = None, strategy: AnswerStrategy | None = None, *, selection: SelectedPassage | None = None) -> str:
     strategy = strategy or (choose_answer_strategy(intent) if intent else AnswerStrategy())
+    context = build_context(retrieved)
+    if selection:
+        source = [f"书名：{selection.book_title or '未提供'}"]
+        if selection.chapter_index is not None:
+            source.append(f"章节序号：{selection.chapter_index + 1}")
+        if selection.paragraph_indices:
+            source.append(f"段落索引：{min(selection.paragraph_indices)}-{max(selection.paragraph_indices)}")
+        selected_context = "\n".join([
+            "用户选文（可能包含尚未进入检索库的编辑）：",
+            *source,
+            selection.text,
+            "回答选文问题时以这段文本为依据，可标注[选文]；数字引用仅对应检索证据。",
+        ])
+        context = f"{selected_context}\n\n检索证据：\n{context or '无'}"
     return load_prompt(strategy.name).format(
         question=question,
-        context=build_context(retrieved),
+        context=context,
         conversation_context=format_conversation_context(conversation),
         min_chars=strategy.min_chars,
         max_chars=strategy.max_chars,
@@ -50,10 +64,10 @@ def make_llm() -> ChatOpenAI:
     return ChatOpenAI(**llm_kwargs(), http_client=httpx.Client(trust_env=False))
 
 
-def generate_answer(question: str, retrieved: list[RetrievedChunk], intent: IntentAnalysis | None = None, conversation: ConversationSession | None = None, strategy: AnswerStrategy | None = None) -> AnswerWithCitations:
-    if not retrieved:
+def generate_answer(question: str, retrieved: list[RetrievedChunk], intent: IntentAnalysis | None = None, conversation: ConversationSession | None = None, strategy: AnswerStrategy | None = None, *, selection: SelectedPassage | None = None) -> AnswerWithCitations:
+    if not retrieved and selection is None:
         return AnswerWithCitations(answer="当前书库证据不足，无法可靠回答。", citations=[])
-    prompt = build_answer_prompt(question, retrieved, intent, conversation, strategy)
+    prompt = build_answer_prompt(question, retrieved, intent, conversation, strategy, selection=selection)
     try:
         response = make_llm().invoke(prompt)
     except Exception as exc:
@@ -61,11 +75,11 @@ def generate_answer(question: str, retrieved: list[RetrievedChunk], intent: Inte
     return AnswerWithCitations(answer=str(response.content), citations=build_citations(retrieved))
 
 
-async def stream_answer(question: str, retrieved: list[RetrievedChunk], intent: IntentAnalysis | None = None, conversation: ConversationSession | None = None, strategy: AnswerStrategy | None = None) -> AsyncIterator[str]:
-    if not retrieved:
+async def stream_answer(question: str, retrieved: list[RetrievedChunk], intent: IntentAnalysis | None = None, conversation: ConversationSession | None = None, strategy: AnswerStrategy | None = None, *, selection: SelectedPassage | None = None) -> AsyncIterator[str]:
+    if not retrieved and selection is None:
         yield "当前书库证据不足，无法可靠回答。"
         return
-    prompt = build_answer_prompt(question, retrieved, intent, conversation, strategy)
+    prompt = build_answer_prompt(question, retrieved, intent, conversation, strategy, selection=selection)
     async_client = httpx.AsyncClient(trust_env=False)
     llm = ChatOpenAI(**llm_kwargs(), http_async_client=async_client)
     try:

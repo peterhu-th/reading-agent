@@ -62,3 +62,13 @@ def test_chunk_ids_are_stable_for_same_input():
     second = chunk_paragraphs(paragraphs, chunk_size=120, overlap=30)
 
     assert [chunk.chunk_id for chunk in first] == [chunk.chunk_id for chunk in second]
+
+
+def test_split_long_paragraph_preserves_reader_paragraph_location():
+    paragraph = make_paragraph(11, "一段很长的原文。" * 100, chapter_index=2)
+
+    chunks = chunk_paragraphs([paragraph], chunk_size=100, overlap=0)
+
+    assert len(chunks) > 1
+    assert all(chunk.chapter_index == 2 for chunk in chunks)
+    assert all(chunk.start_paragraph_index == 11 and chunk.end_paragraph_index == 11 for chunk in chunks)

@@ -105,14 +105,8 @@ def split_long_paragraph(paragraph: BookParagraph, chunk_size: int) -> list[Book
         text = text_value[start:end].strip()
         if not text:
             break
-        parts.append(
-            paragraph.model_copy(
-                update={
-                    "paragraph_index": paragraph.paragraph_index * 1000 + len(parts),
-                    "text": text,
-                }
-            )
-        )
+        # All pieces still originate from the same reader paragraph.
+        parts.append(paragraph.model_copy(update={"text": text}))
         start = end
     return parts
 
