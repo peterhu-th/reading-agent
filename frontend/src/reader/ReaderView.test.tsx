@@ -77,6 +77,40 @@ test("preserves the browser selection during ordinary edit state updates", () =>
 
 afterEach(() => vi.useRealTimers());
 
+test("emoji selections send Unicode code-point offsets and render the same annotated text", async () => {
+  const onAnnotate = vi.fn().mockResolvedValue(undefined);
+  const item = { ...paragraph, text: "甲😀乙尾" };
+  const view = render(reader([item], 1, { onAnnotate }));
+  const block = view.container.querySelector<HTMLElement>(".reader-block")!;
+  Object.defineProperty(block, "innerText", { configurable: true, get: () => block.textContent });
+  const range = document.createRange();
+  range.setStart(block.firstChild!, 1);
+  range.setEnd(block.firstChild!, 4);
+  range.getBoundingClientRect = () => ({ left: 100, top: 200, width: 100 }) as DOMRect;
+  window.getSelection()?.removeAllRanges();
+  window.getSelection()?.addRange(range);
+  fireEvent.mouseUp(view.container.querySelector(".reader-scroll")!);
+  fireEvent.click(view.getByRole("button", { name: /^批注$/ }));
+  await act(async () => undefined);
+  expect(onAnnotate).toHaveBeenCalledWith(expect.objectContaining({ text: "😀乙", startOffset: 1, endOffset: 3 }), "yellow", "");
+  view.rerender(reader([{ ...item, annotations: [{
+    annotation_id: "emoji", book_id: "book", chapter_index: 0, start_edit_id: item.edit_id, end_edit_id: item.edit_id,
+    start_offset: 1, end_offset: 3, selected_text: "😀乙", color: "yellow", comment: "", created_at: "", updated_at: "",
+  }] }], 2));
+  expect(view.container.querySelector("mark")).toHaveTextContent("😀乙");
+  expect(view.container.querySelector(".reader-block")).toHaveTextContent("甲😀乙尾");
+});
+
+test("the bookmark target is the first visible paragraph rather than the first loaded paragraph", () => {
+  const ref = createRef<ReaderViewHandle>();
+  const next = { ...paragraph, edit_id: "visible", paragraph_index: 1, text: "当前屏幕中的正文" };
+  const view = render(reader([paragraph, next], 1, { ref }));
+  const blocks = view.container.querySelectorAll<HTMLElement>(".reader-block");
+  blocks[0].getBoundingClientRect = () => ({ bottom: 10 }) as DOMRect;
+  blocks[1].getBoundingClientRect = () => ({ bottom: 200 }) as DOMRect;
+  expect(ref.current?.currentParagraph()).toEqual(next);
+});
+
 function edit(view: ReturnType<typeof render>, text: string) {
   const block = view.container.querySelector<HTMLElement>(".reader-block")!;
   Object.defineProperty(block, "innerText", { configurable: true, get: () => block.textContent });

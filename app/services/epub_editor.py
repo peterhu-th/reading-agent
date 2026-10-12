@@ -14,6 +14,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+from app.ingestion.epub_source import parse_epub_html
 from app.ingestion.reader_epub import load_epub_for_reader
 from app.models.schemas import ReaderContentRecord
 from app.services.reader import reader_edit_id
@@ -73,14 +74,18 @@ class EpubEditorService:
             hrefs = {record.source_href for record in chapter_records if record.source_href}
             chapter_updates_by_epub[source_epub].append((hrefs, title))
 
-        records_by_previous_id = {
-            reader_edit_id(record): record.model_copy(update={
-                "text": edited_text.get(reader_edit_id(record), record.text),
-                "chapter_title": chapter_titles.get((record.book_id, record.chapter_index), record.chapter_title),
-            })
-            for record in all_records
-            if reader_edit_id(record) not in deleted
-        }
+        records_by_previous_id: dict[str, ReaderContentRecord] = {}
+        for record in all_records:
+            edit_id = reader_edit_id(record)
+            if edit_id in deleted:
+                continue
+            updates: dict[str, str] = {}
+            if edit_id in edited_text and edited_text[edit_id] != record.text:
+                updates["text"] = edited_text[edit_id]
+            title = chapter_titles.get((record.book_id, record.chapter_index))
+            if title is not None and title != record.chapter_title:
+                updates["chapter_title"] = title
+            records_by_previous_id[edit_id] = record.model_copy(update=updates) if updates else record
         changed_sources = set(records_by_epub) | set(chapter_updates_by_epub)
         if not changed_sources:
             yield PreparedEpubSave({}, list(records_by_previous_id.values()), records_by_previous_id)
@@ -160,7 +165,7 @@ class EpubEditorService:
                 )
                 if archive_name is None:
                     raise EpubEditError(f"EPUB 内找不到正文文件：{source_href}")
-                soup = BeautifulSoup(source.read(archive_name), "lxml")
+                soup = parse_epub_html(source.read(archive_name))
                 resolved_nodes: list[tuple[Tag, list[ReaderContentRecord]]] = []
                 for path, node_lines in nodes.items():
                     node = resolve_tag_path(soup, path)
@@ -219,7 +224,7 @@ class EpubEditorService:
             if suffix not in {".xhtml", ".html", ".htm", ".ncx"}:
                 continue
             data = replacements.get(info.filename, source.read(info.filename))
-            soup = BeautifulSoup(data, "xml" if suffix == ".ncx" else "lxml")
+            soup = BeautifulSoup(data, "xml") if suffix == ".ncx" else parse_epub_html(data)
             changed = False
             if suffix == ".ncx":
                 for content in soup.find_all("content"):

@@ -74,6 +74,8 @@ def rebuild_index(chunks_path: str | None = None) -> int:
 def rebuild_index_with_stats(
     chunks_path: str | None = None,
     progress: ProgressCallback | None = None,
+    *,
+    force_reset: bool = False,
 ) -> IndexBuildStats:
     settings = get_settings()
     chunks = load_chunks(chunks_path or settings.CHUNKS_JSONL_PATH)
@@ -86,6 +88,7 @@ def rebuild_index_with_stats(
         settings.VECTOR_DB_PATH,
         progress,
         reuse_unchanged=True,
+        force_reset=force_reset,
     )
 
 
@@ -108,11 +111,13 @@ def sync_index_documents(
     progress: ProgressCallback | None = None,
     *,
     reuse_unchanged: bool = False,
+    compare_text: bool = False,
+    force_reset: bool = False,
 ) -> IndexBuildStats:
     """Synchronize one complete source inventory with its embedding collection.
 
-    Only chunk documents opt into metadata comparison: their existing content_hash
-    includes the source text. Summary documents are always updated.
+    Chunk metadata includes the existing content_hash. Summaries additionally
+    compare stored text so unchanged summaries can reuse their embeddings.
     """
     vectorstore = make_vectorstore(
         collection_name,
@@ -120,16 +125,20 @@ def sync_index_documents(
         with_embeddings=False,
     )
     emit(progress, "Reading existing Chroma metadata...")
-    raw = vectorstore.get(include=["metadatas"])
+    raw = vectorstore.get(include=["metadatas", "documents"] if compare_text else ["metadatas"])
     existing = dict(zip(raw["ids"], raw["metadatas"], strict=True))
+    existing_texts = dict(zip(raw["ids"], raw["documents"], strict=True)) if compare_text else {}
     current_ids = set(ids)
     stale_ids = [document_id for document_id in existing if document_id not in current_ids]
 
     expected_config = embedding_index_config()
     collection_metadata = vectorstore._collection.metadata or {}
-    reset = any(collection_metadata.get(key) != value for key, value in expected_config.items())
+    reset = force_reset or any(
+        collection_metadata.get(key) != value for key, value in expected_config.items()
+    )
     if reset:
-        emit(progress, "Embedding configuration changed or missing; rebuilding Chroma collection...")
+        reason = "Index reset requested" if force_reset else "Embedding configuration changed or missing"
+        emit(progress, f"{reason}; rebuilding Chroma collection...")
         vectorstore.reset_collection()
     elif stale_ids:
         emit(progress, f"Deleting {len(stale_ids)} stale records from Chroma...")
@@ -138,7 +147,12 @@ def sync_index_documents(
     changed_documents: list[Document] = []
     changed_ids: list[str] = []
     for chunk_id, document in zip(ids, documents, strict=True):
-        if reuse_unchanged and not reset and existing.get(chunk_id) == document.metadata:
+        if (
+            reuse_unchanged
+            and not reset
+            and existing.get(chunk_id) == document.metadata
+            and (not compare_text or existing_texts.get(chunk_id) == document.page_content)
+        ):
             continue
         changed_ids.append(chunk_id)
         changed_documents.append(document)
@@ -156,7 +170,8 @@ def sync_index_documents(
         emit(progress, "No changed records to index.")
 
     # Mark the embedding space only after a complete successful rebuild.
-    vectorstore._collection.modify(metadata={**collection_metadata, **expected_config})
+    if reset:
+        vectorstore._collection.modify(metadata={**collection_metadata, **expected_config})
 
     return IndexBuildStats(
         total_chunks=len(documents),
@@ -193,7 +208,7 @@ def add_documents_in_batches(
     total = len(documents)
     for start in range(0, total, CHROMA_BATCH_SIZE):
         end = min(start + CHROMA_BATCH_SIZE, total)
-        emit(progress, f"Indexing chunks {start + 1}-{end}/{total}...")
+        emit(progress, f"Indexing records {start + 1}-{end}/{total}...")
         vectorstore.add_documents(
             documents=documents[start:end],
             ids=ids[start:end],

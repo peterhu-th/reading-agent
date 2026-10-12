@@ -54,9 +54,11 @@ class DatabaseUpdateService:
                 errors="replace",
             )
             assert process.stdout is not None
+            last_message = ""
             for line in process.stdout:
                 message = line.strip()
                 if message:
+                    last_message = message
                     with self._lock:
                         self._message = message
             return_code = process.wait()
@@ -64,7 +66,7 @@ class DatabaseUpdateService:
                 self._return_code = return_code
                 self._status = "complete" if return_code == 0 else "failed"
                 if return_code == 0:
-                    self._message = "数据库更新完成；重新启动服务后将从新数据库载入书库。"
+                    self._message = last_message or "数据库更新完成；重新启动服务后将从新数据库载入书库。"
                 elif not self._message:
                     self._message = f"数据库更新失败，退出码 {return_code}。"
         except Exception as exc:

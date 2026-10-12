@@ -21,6 +21,7 @@ from app.services.editor_session import EditorSessionService
 from app.services.epub_editor import EpubEditError
 from app.services.reader import ReaderNotFoundError, ReaderService
 from app.services.reading_assistant import ReadingAssistantService
+from app.web.reader_routes import create_reader_tools_router
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,7 +48,9 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"] ,
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
+app.include_router(create_reader_tools_router(reader, editor))
 
 
 @app.get("/api/health")
@@ -102,16 +105,6 @@ def reader_chapter(book_id: str, chapter_index: int, offset: int = 0, limit: int
         raise HTTPException(status_code=404, detail="书籍或章节不存在。") from exc
 
 
-@app.get("/api/reader/books/{book_id}/search")
-def reader_search(book_id: str, q: str, chapter_index: int | None = None, limit: int = 30) -> list[dict]:
-    if limit < 1 or limit > 100:
-        raise HTTPException(status_code=422, detail="搜索数量无效。")
-    try:
-        return [item.model_dump(mode="json") for item in reader.search(book_id, q, chapter_index, limit)]
-    except ReaderNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="书籍不存在。") from exc
-
-
 @app.get("/api/editor/state")
 def editor_state() -> dict:
     state = editor.state().model_dump(mode="json")
@@ -134,7 +127,7 @@ def editor_operation(payload: ReaderOperationRequest) -> dict:
         raise HTTPException(status_code=404, detail="编辑段落不存在，请刷新阅读数据后重试。") from exc
 
 
-@app.post("/api/editor/annotations", status_code=201)
+@app.post("/api/editor/annotations", status_code=201, deprecated=True)
 def create_annotation(payload: AnnotationCreateRequest) -> dict:
     try:
         annotation, state = editor.add_annotation(payload)
@@ -144,9 +137,11 @@ def create_annotation(payload: AnnotationCreateRequest) -> dict:
         }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="批注选区已经失效，请重新选择。") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.delete("/api/editor/annotations/{annotation_id}")
+@app.delete("/api/editor/annotations/{annotation_id}", deprecated=True)
 def delete_annotation(annotation_id: str) -> dict:
     try:
         return editor.delete_annotation(annotation_id).model_dump(mode="json")

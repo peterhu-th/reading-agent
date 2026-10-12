@@ -38,6 +38,7 @@ class Settings(BaseModel):
     BOOKS_JSONL_PATH: str = "./data/processed/books_jsonl/books.jsonl"
     READER_JSONL_PATH: str = "./data/processed/reader_jsonl/reader.jsonl"
     ANNOTATIONS_JSON_PATH: str = "./data/user/annotations.json"
+    BOOKMARKS_JSON_PATH: str = "./data/user/bookmarks.json"
     CHUNKS_JSONL_PATH: str = "./data/processed/chunks_jsonl/chunks.jsonl"
     SUMMARIES_JSONL_PATH: str = "./data/processed/summaries_jsonl/summaries.jsonl"
     CHROMA_COLLECTION: str = "reading_memory_chunks"
@@ -108,6 +109,7 @@ def get_settings() -> Settings:
         BOOKS_JSONL_PATH=os.getenv("BOOKS_JSONL_PATH", "./data/processed/books_jsonl/books.jsonl"),
         READER_JSONL_PATH=os.getenv("READER_JSONL_PATH", "./data/processed/reader_jsonl/reader.jsonl"),
         ANNOTATIONS_JSON_PATH=os.getenv("ANNOTATIONS_JSON_PATH", "./data/user/annotations.json"),
+        BOOKMARKS_JSON_PATH=os.getenv("BOOKMARKS_JSON_PATH", "./data/user/bookmarks.json"),
         CHUNKS_JSONL_PATH=os.getenv("CHUNKS_JSONL_PATH", "./data/processed/chunks_jsonl/chunks.jsonl"),
         SUMMARIES_JSONL_PATH=os.getenv("SUMMARIES_JSONL_PATH", "./data/processed/summaries_jsonl/summaries.jsonl"),
         CHROMA_COLLECTION=os.getenv("CHROMA_COLLECTION", "reading_memory_chunks"),

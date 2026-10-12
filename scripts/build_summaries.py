@@ -4,6 +4,8 @@ import json
 import re
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -37,6 +39,15 @@ NON_CONTENT_MARKERS = (
 SENTENCE_PATTERN = re.compile(r"[^。！？!?；;]{18,220}[。！？!?；;]?")
 
 
+@dataclass
+class SummaryUpdateStats:
+    total_records: int
+    generated_records: int
+    deleted_records: int
+    pending_records: int
+    written: bool = False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="Show pending summaries without generating them.")
@@ -49,45 +60,94 @@ def main() -> None:
     )
     parser.add_argument("--progress-every", type=int, default=50, help="Print progress every N records.")
     args = parser.parse_args()
+    stats = update_summaries(
+        backend=args.backend or None,
+        dry_run=args.dry_run,
+        limit=args.limit,
+        progress=print,
+        progress_every=args.progress_every,
+    )
+    if not args.dry_run:
+        print(f"摘要更新完成：共 {stats.total_records} 条，生成 {stats.generated_records} 条，删除 {stats.deleted_records} 条。")
 
+
+def update_summaries(
+    *,
+    chunks: list[TextChunk] | None = None,
+    changed_book_ids: set[str] | None = None,
+    backend: str | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+    limit: int = 0,
+    progress: Callable[[str], None] | None = None,
+    progress_every: int = 50,
+) -> SummaryUpdateStats:
+    """Update affected books, preserving untouched records and file timestamps.
+
+    A caller tracking source/configuration changes can pass changed_book_ids and
+    force. None checks every book; force regenerates all summaries, including
+    changes to summary length and source-budget settings.
+    """
     settings = get_settings()
-    backend = args.backend or settings.SUMMARY_BACKEND
-    chunks = load_chunks(settings.CHUNKS_JSONL_PATH)
-    chunks_by_id = {chunk.chunk_id: chunk for chunk in chunks}
-    existing = load_existing(settings.SUMMARIES_JSONL_PATH)
-    current_records = build_current_records(chunks, backend)
+    backend = backend or settings.SUMMARY_BACKEND
+    if chunks is None:
+        chunks = load_chunks(settings.CHUNKS_JSONL_PATH)
+    output_path = Path(settings.SUMMARIES_JSONL_PATH)
+    existing = load_existing(str(output_path))
+    prompt_version = f"{settings.SUMMARY_PROMPT_VERSION}:{backend}"
+    summary_model = settings.SUMMARY_MODEL if backend == "llm" else "extractive"
+    configuration_changed = any(
+        record.prompt_version != prompt_version or record.summary_model != summary_model
+        for record in existing.values()
+    )
+    affected_book_ids = changed_book_ids or set()
+    check_all = changed_book_ids is None or force or configuration_changed or not output_path.exists()
+    affected_chunks = chunks if check_all else [chunk for chunk in chunks if chunk.book_id in affected_book_ids]
+    current_records = build_current_records(affected_chunks, backend)
     pending = [
         record
         for record in current_records
-        if should_regenerate(record, existing.get(record.summary_id))
+        if force or should_regenerate(record, existing.get(record.summary_id))
     ]
+    pending_count = len(pending)
+    if limit > 0:
+        pending = pending[:limit]
 
-    if args.limit > 0:
-        pending = pending[: args.limit]
-
-    print(f"需要生成或更新 {len(pending)} 条摘要，backend={backend}。")
-    if args.dry_run:
-        for record in pending[:20]:
-            print(f"- {record.summary_id} | {record.title} | {record.chapter_title or record.summary_type}")
-        return
-
-    llm = make_llm() if backend == "llm" else None
-    output_path = Path(settings.SUMMARIES_JSONL_PATH)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     pending_ids = {item.summary_id for item in pending}
     current_ids = {item.summary_id for item in current_records}
-    stale_count = sum(1 for record in existing.values() if record.summary_id not in current_ids)
+    available_book_ids = {chunk.book_id for chunk in chunks}
+    stale_ids = {
+        record.summary_id
+        for record in existing.values()
+        if record.book_id not in available_book_ids
+        or ((check_all or record.book_id in affected_book_ids) and record.summary_id not in current_ids)
+    }
     kept = [
         record
         for record in existing.values()
-        if record.summary_id in current_ids and record.summary_id not in pending_ids
+        if record.summary_id not in stale_ids and record.summary_id not in pending_ids
     ]
-    generated: list[SummaryRecord] = []
+    stats = SummaryUpdateStats(
+        total_records=len(kept) + len(pending),
+        generated_records=0,
+        deleted_records=len(stale_ids),
+        pending_records=pending_count,
+    )
+    if progress:
+        progress(f"需要生成或更新 {len(pending)} 条摘要，backend={backend}。")
+    if dry_run:
+        if progress:
+            for record in pending[:20]:
+                progress(f"- {record.summary_id} | {record.title} | {record.chapter_title or record.summary_type}")
+        return stats
+    if not pending and not stale_ids and output_path.exists():
+        return stats
+    if stale_ids and progress:
+        progress(f"清理 {len(stale_ids)} 条过期摘要。")
 
-    if not pending and stale_count == 0:
-        return
-    if stale_count:
-        print(f"清理 {stale_count} 条过期摘要。")
+    llm = make_llm() if pending and backend == "llm" else None
+    chunks_by_id = {chunk.chunk_id: chunk for chunk in affected_chunks}
+    generated: list[SummaryRecord] = []
 
     for index, record in enumerate(pending, start=1):
         if backend == "llm" and llm is not None:
@@ -97,12 +157,18 @@ def main() -> None:
         else:
             summary_text = build_extractive_summary(record, chunks_by_id)
         generated.append(record.model_copy(update={"text": summary_text}))
-        if index == 1 or index == len(pending) or index % max(args.progress_every, 1) == 0:
-            print(f"[{index}/{len(pending)}] 已生成：{record.title} / {record.chapter_title or record.summary_type}")
+        if progress and (index == 1 or index == len(pending) or index % max(progress_every, 1) == 0):
+            progress(f"[{index}/{len(pending)}] 已生成：{record.title} / {record.chapter_title or record.summary_type}")
 
-    with output_path.open("w", encoding="utf-8") as file:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as file:
         for record in kept + generated:
             file.write(json.dumps(record.model_dump(), ensure_ascii=False) + "\n")
+    temporary.replace(output_path)
+    stats.generated_records = len(generated)
+    stats.written = True
+    return stats
 
 
 def make_llm() -> ChatOpenAI:
@@ -145,14 +211,14 @@ def build_current_records(chunks: list[TextChunk], backend: str) -> list[Summary
     for (_book_id, _chapter_index), chapter_chunks in grouped.items():
         if not collect_sentences(chapter_chunks):
             continue
-        record = make_record("chapter", chapter_chunks, prompt_version)
+        record = make_record("chapter", chapter_chunks, prompt_version, backend=backend)
         records.append(record)
 
     for _book_id, book_chunks in books.items():
         sampled = sample_book_chunks(book_chunks)
         if not collect_sentences(sampled):
             continue
-        record = make_record("book", sampled, prompt_version)
+        record = make_record("book", sampled, prompt_version, backend=backend)
         record = record.model_copy(update={"source_hash": hash_chunks(book_chunks)})
         records.append(record)
     return records
@@ -161,13 +227,12 @@ def build_current_records(chunks: list[TextChunk], backend: str) -> list[Summary
 def should_regenerate(record: SummaryRecord, old: SummaryRecord | None) -> bool:
     return (
         old is None
-        or old.source_hash != record.source_hash
-        or old.prompt_version != record.prompt_version
+        or old.model_dump(exclude={"text"}) != record.model_dump(exclude={"text"})
         or looks_like_truncated_source(old.text)
     )
 
 
-def make_record(summary_type: str, chunks: list[TextChunk], prompt_version: str) -> SummaryRecord:
+def make_record(summary_type: str, chunks: list[TextChunk], prompt_version: str, *, backend: str = "llm") -> SummaryRecord:
     settings = get_settings()
     first = chunks[0]
     chapter_index = first.chapter_index if summary_type == "chapter" else None
@@ -184,7 +249,7 @@ def make_record(summary_type: str, chunks: list[TextChunk], prompt_version: str)
         chapter_title=chapter_title,
         source_chunk_ids=source_chunk_ids,
         source_hash=hash_chunks(chunks),
-        summary_model=settings.SUMMARY_MODEL,
+        summary_model=settings.SUMMARY_MODEL if backend == "llm" else "extractive",
         prompt_version=prompt_version,
         text="待生成",
     )

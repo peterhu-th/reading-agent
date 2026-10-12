@@ -51,7 +51,7 @@ temp/
 data/
 
 # Local model files
-models/
+/models/
 
 # Local inspection and generated reports
 *.jsonl.tmp

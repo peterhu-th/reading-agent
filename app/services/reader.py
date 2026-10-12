@@ -3,9 +3,11 @@ import hashlib
 from collections import defaultdict
 from functools import cached_property
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from app.config import get_settings
+from app.models.reader_tools import PaginatedResponse, SearchResultItem
 from app.models.schemas import (
     BookParagraph,
     ReaderBook,
@@ -36,26 +38,61 @@ class ReaderService:
         self.books_path = Path(books_path or settings.BOOKS_JSONL_PATH)
         self.chunks_path = Path(chunks_path or settings.CHUNKS_JSONL_PATH)
         self.editor: Any | None = None
+        self._lock = RLock()
+        self._chapter_records: dict[str, dict[int, list[ReaderContentRecord]]] = {}
+        self._chapter_metadata: dict[str, list[ReaderChapter]] = {}
+        self._chapter_positions: dict[str, dict[int, int]] = {}
+        self._book_metadata: dict[str, ReaderBook] = {}
 
     def set_editor(self, editor: Any) -> None:
-        self.editor = editor
-        self.invalidate_effective()
+        with self._lock:
+            self.editor = editor
+            self.invalidate_effective()
 
     def reload(self) -> None:
         """Discard the current snapshot so the next access reads files again."""
 
-        for name in ("records", "chapters", "books", "book_by_id"):
-            self.__dict__.pop(name, None)
+        with self._lock:
+            for name in ("records", "records_by_book", "chapters"):
+                self.__dict__.pop(name, None)
+            self._chapter_records.clear()
+            self.invalidate_effective()
 
-    def replace_records(self, records: list[ReaderContentRecord]) -> None:
-        """Install a successfully saved reader snapshot and discard derived views."""
+    def replace_records(
+        self,
+        records: list[ReaderContentRecord],
+        affected_book_ids: set[str] | None = None,
+    ) -> None:
+        """Install saved records while retaining the views of unchanged books."""
 
-        self.reload()
-        self.__dict__["records"] = records
+        with self._lock:
+            if affected_book_ids is None:
+                self.reload()
+            else:
+                grouped = self.__dict__.get("records_by_book")
+                if grouped is not None:
+                    for book_id in affected_book_ids:
+                        grouped.pop(book_id, None)
+                    for record in records:
+                        if record.book_id in affected_book_ids:
+                            grouped.setdefault(record.book_id, []).append(record)
+                for book_id in affected_book_ids:
+                    self._chapter_records.pop(book_id, None)
+                self.__dict__.pop("chapters", None)
+                self.invalidate_effective(affected_book_ids)
+            self.__dict__["records"] = records
 
-    def invalidate_effective(self) -> None:
-        for name in ("books", "book_by_id"):
-            self.__dict__.pop(name, None)
+    def invalidate_effective(self, book_ids: set[str] | None = None) -> None:
+        with self._lock:
+            if book_ids is None:
+                self._chapter_metadata.clear()
+                self._chapter_positions.clear()
+                self._book_metadata.clear()
+            else:
+                for book_id in book_ids:
+                    self._chapter_metadata.pop(book_id, None)
+                    self._chapter_positions.pop(book_id, None)
+                    self._book_metadata.pop(book_id, None)
 
     def effective_records(self, records: list[ReaderContentRecord]) -> list[ReaderContentRecord]:
         if self.editor is None:
@@ -115,72 +152,87 @@ class ReaderService:
         return result
 
     @cached_property
-    def chapters(self) -> dict[tuple[str, int], list[ReaderContentRecord]]:
-        grouped: dict[tuple[str, int], list[ReaderContentRecord]] = defaultdict(list)
+    def records_by_book(self) -> dict[str, list[ReaderContentRecord]]:
+        grouped: dict[str, list[ReaderContentRecord]] = defaultdict(list)
         for record in self.records:
-            grouped[(record.book_id, record.chapter_index)].append(record)
-        for values in grouped.values():
-            values.sort(key=lambda item: item.paragraph_index)
+            grouped[record.book_id].append(record)
         return dict(grouped)
 
-    @cached_property
-    def books(self) -> list[ReaderBook]:
-        grouped: dict[str, dict] = {}
-        for record in self.records:
-            grouped.setdefault(
-                record.book_id,
-                {"title": record.title, "author": record.author, "book_type": record.book_type, "chapters": set(), "paragraph_count": 0},
-            )
-        for record in self.effective_records(self.records):
-            item = grouped[record.book_id]
-            item["chapters"].add(record.chapter_index)
-            item["paragraph_count"] += 1
-        return sorted(
-            [
-                ReaderBook(
-                    book_id=book_id,
-                    title=item["title"],
-                    author=item["author"],
-                    book_type=item["book_type"],
-                    chapter_count=len(item["chapters"]),
-                    paragraph_count=item["paragraph_count"],
-                )
-                for book_id, item in grouped.items()
-            ],
-            key=lambda item: item.title,
-        )
+    def _chapters_for_book(self, book_id: str) -> dict[int, list[ReaderContentRecord]]:
+        if book_id in self._chapter_records:
+            return self._chapter_records[book_id]
+        records = self.records_by_book.get(book_id)
+        if records is None:
+            raise ReaderNotFoundError(book_id)
+        grouped: dict[int, list[ReaderContentRecord]] = defaultdict(list)
+        for record in records:
+            grouped[record.chapter_index].append(record)
+        for values in grouped.values():
+            values.sort(key=lambda item: item.paragraph_index)
+        self._chapter_records[book_id] = dict(sorted(grouped.items()))
+        return self._chapter_records[book_id]
 
     @cached_property
+    def chapters(self) -> dict[tuple[str, int], list[ReaderContentRecord]]:
+        return {
+            (book_id, chapter_index): records
+            for book_id in self.records_by_book
+            for chapter_index, records in self._chapters_for_book(book_id).items()
+        }
+
+    @property
+    def books(self) -> list[ReaderBook]:
+        with self._lock:
+            return sorted(self.book_by_id.values(), key=lambda item: item.title)
+
+    @property
     def book_by_id(self) -> dict[str, ReaderBook]:
-        return {book.book_id: book for book in self.books}
+        with self._lock:
+            return {book_id: self.get_book(book_id) for book_id in self.records_by_book}
 
     def get_book(self, book_id: str) -> ReaderBook:
-        book = self.book_by_id.get(book_id)
-        if book is None:
-            raise ReaderNotFoundError(book_id)
-        return book
+        with self._lock:
+            if book_id in self._book_metadata:
+                return self._book_metadata[book_id]
+            records = self.records_by_book.get(book_id)
+            if not records:
+                raise ReaderNotFoundError(book_id)
+            first = records[0]
+            chapters = self.list_chapters(book_id)
+            book = ReaderBook(
+                book_id=book_id,
+                title=first.title,
+                author=first.author,
+                book_type=first.book_type,
+                chapter_count=len(chapters),
+                paragraph_count=sum(chapter.paragraph_count for chapter in chapters),
+            )
+            self._book_metadata[book_id] = book
+            return book
 
     def list_chapters(self, book_id: str) -> list[ReaderChapter]:
-        self.get_book(book_id)
-        result: list[ReaderChapter] = []
-        for (candidate_id, chapter_index), records in self.chapters.items():
-            if candidate_id != book_id or not records:
-                continue
-            effective = self.effective_records(records)
-            if not effective:
-                continue
-            first = effective[0] if effective else records[0]
-            result.append(
-                ReaderChapter(
-                    book_id=book_id,
-                    chapter_index=chapter_index,
-                    chapter_title=first.chapter_title.strip() or f"第 {chapter_index + 1} 章",
-                    depth=first.chapter_depth,
-                    paragraph_count=len(effective),
-                    preview=make_excerpt(next((item.text for item in effective if item.kind != "heading"), first.text if effective else ""), 80),
+        with self._lock:
+            if book_id in self._chapter_metadata:
+                return self._chapter_metadata[book_id]
+            result: list[ReaderChapter] = []
+            for chapter_index, records in self._chapters_for_book(book_id).items():
+                effective = self.effective_records(records)
+                if not effective:
+                    continue
+                first = effective[0]
+                result.append(
+                    ReaderChapter(
+                        book_id=book_id,
+                        chapter_index=chapter_index,
+                        chapter_title=first.chapter_title.strip() or f"第 {chapter_index + 1} 章",
+                        depth=first.chapter_depth,
+                        paragraph_count=len(effective),
+                        preview=make_excerpt(next((item.text for item in effective if item.kind != "heading"), first.text), 80),
+                    )
                 )
-            )
-        return sorted(result, key=lambda item: item.chapter_index)
+            self._chapter_metadata[book_id] = result
+            self._chapter_positions[book_id] = {chapter.chapter_index: position for position, chapter in enumerate(result)}
+            return result
 
     def get_chapter(
         self,
@@ -190,90 +242,140 @@ class ReaderService:
         limit: int = 80,
         focus_paragraph: int | None = None,
     ) -> ReaderPage:
-        book = self.get_book(book_id)
-        base_records = self.chapters.get((book_id, chapter_index))
-        if base_records is None:
-            raise ReaderNotFoundError(f"{book_id}:{chapter_index}")
-        records = self.effective_records(base_records)
-        if not records:
-            raise ReaderNotFoundError(f"{book_id}:{chapter_index}")
-        if focus_paragraph is not None and records:
-            focus_position = next((index for index, item in enumerate(records) if item.paragraph_index >= focus_paragraph), len(records) - 1)
-            leading_context = min(12, max(1, limit // 4))
-            offset = max(0, focus_position - leading_context)
-        chapter_list = self.list_chapters(book_id)
-        positions = [item.chapter_index for item in chapter_list]
-        position = positions.index(chapter_index)
-        selected = records[offset : offset + limit]
-        return ReaderPage(
-            book=book,
-            chapter=chapter_list[position],
-            paragraphs=[
-                ReaderParagraph(
-                    paragraph_index=item.paragraph_index,
-                    edit_id=reader_edit_id(item),
-                    text=item.text,
-                    kind=item.kind,
-                    annotations=self.editor.annotations_for_record(item) if self.editor else [],
-                )
-                for item in selected
-            ],
-            offset=offset,
-            next_offset=offset + limit if offset + limit < len(records) else None,
-            previous_chapter_index=positions[position - 1] if position > 0 else None,
-            next_chapter_index=positions[position + 1] if position + 1 < len(positions) else None,
-        )
-
-    def search(self, book_id: str, query: str, chapter_index: int | None = None, limit: int = 30) -> list[ReaderSearchHit]:
-        self.get_book(book_id)
-        needle = query.strip().lower()
-        if not needle:
-            return []
-        hits: list[ReaderSearchHit] = []
-        for (candidate_id, candidate_chapter), base_records in self.chapters.items():
-            if candidate_id != book_id or (chapter_index is not None and candidate_chapter != chapter_index):
-                continue
+        with self._lock:
+            book = self.get_book(book_id)
+            base_records = self._chapters_for_book(book_id).get(chapter_index)
+            if base_records is None:
+                raise ReaderNotFoundError(f"{book_id}:{chapter_index}")
             records = self.effective_records(base_records)
             if not records:
-                continue
-            title = records[0].chapter_title.strip() or f"第 {candidate_chapter + 1} 章"
-            for record in records:
-                if needle in record.text.lower():
-                    hits.append(
-                        ReaderSearchHit(
-                            chapter_index=candidate_chapter,
-                            chapter_title=title,
-                            paragraph_index=record.paragraph_index,
-                            excerpt=highlight_excerpt(record.text, needle),
-                        )
+                raise ReaderNotFoundError(f"{book_id}:{chapter_index}")
+            if focus_paragraph is not None and records:
+                focus_position = next((index for index, item in enumerate(records) if item.paragraph_index >= focus_paragraph), len(records) - 1)
+                leading_context = min(12, max(1, limit // 4))
+                offset = max(0, focus_position - leading_context)
+            chapter_list = self.list_chapters(book_id)
+            position = self._chapter_positions[book_id][chapter_index]
+            selected = records[offset : offset + limit]
+            return ReaderPage(
+                book=book,
+                chapter=chapter_list[position],
+                paragraphs=[
+                    ReaderParagraph(
+                        paragraph_index=item.paragraph_index,
+                        edit_id=reader_edit_id(item),
+                        text=item.text,
+                        kind=item.kind,
+                        annotations=self.editor.annotations_for_record(item) if self.editor else [],
                     )
-                    if len(hits) >= limit:
-                        return hits
-        return hits
+                    for item in selected
+                ],
+                offset=offset,
+                next_offset=offset + limit if offset + limit < len(records) else None,
+                previous_chapter_index=chapter_list[position - 1].chapter_index if position > 0 else None,
+                next_chapter_index=chapter_list[position + 1].chapter_index if position + 1 < len(chapter_list) else None,
+            )
+
+    def search(self, book_id: str, query: str, chapter_index: int | None = None, limit: int = 30) -> list[ReaderSearchHit]:
+        """Keep the list response used by existing service callers."""
+
+        if not query.strip():
+            return []
+        page = self.search_page(book_id, query, chapter_index=chapter_index, limit=limit)
+        return [ReaderSearchHit(**item.model_dump()) for item in page.items]
+
+    def search_page(
+        self,
+        book_id: str,
+        query: str,
+        chapter_index: int | None = None,
+        offset: int = 0,
+        limit: int = 30,
+    ) -> PaginatedResponse[SearchResultItem]:
+        with self._lock:
+            self.get_book(book_id)
+            needle = query.strip().lower()
+            if not needle:
+                raise ValueError("搜索关键词不能为空。")
+            if chapter_index is not None and chapter_index not in self._chapter_positions[book_id]:
+                raise ReaderNotFoundError(f"{book_id}:{chapter_index}")
+            hits: list[SearchResultItem] = []
+            total = 0
+            for candidate_chapter, base_records in self._chapters_for_book(book_id).items():
+                if chapter_index is not None and candidate_chapter != chapter_index:
+                    continue
+                records = self.effective_records(base_records)
+                if not records:
+                    continue
+                title = records[0].chapter_title.strip() or f"第 {candidate_chapter + 1} 章"
+                for record in records:
+                    if needle in record.text.lower():
+                        if offset <= total < offset + limit:
+                            hits.append(
+                                SearchResultItem(
+                                    book_id=book_id,
+                                    edit_id=reader_edit_id(record),
+                                    chapter_index=candidate_chapter,
+                                    chapter_title=title,
+                                    paragraph_index=record.paragraph_index,
+                                    excerpt=highlight_excerpt(record.text, needle),
+                                    reader_location=ReaderLocation(
+                                        book_id=book_id,
+                                        chapter_index=candidate_chapter,
+                                        start_paragraph_index=record.paragraph_index,
+                                        end_paragraph_index=record.paragraph_index,
+                                    ),
+                                )
+                            )
+                        total += 1
+            return PaginatedResponse[SearchResultItem](
+                items=hits,
+                total=total,
+                offset=offset,
+                limit=limit,
+                next_offset=offset + limit if offset + limit < total else None,
+            )
+
+    def locate_edit_id(self, book_id: str, edit_id: str) -> ReaderLocation | None:
+        """Resolve a paragraph identity in the current document, including edits."""
+
+        with self._lock:
+            if self.editor is not None:
+                return self.editor.resolve_location(book_id, edit_id)
+            for record in self.records_by_book.get(book_id, []):
+                if reader_edit_id(record) == edit_id:
+                    return ReaderLocation(
+                        book_id=book_id,
+                        chapter_index=record.chapter_index,
+                        start_paragraph_index=record.paragraph_index,
+                        end_paragraph_index=record.paragraph_index,
+                    )
+            return None
 
     def locate(self, book_id: str, source_text: str) -> ReaderLocation | None:
         """Map a filtered RAG chunk back to its lossless reader location."""
 
-        compact_source = compact_text(source_text)
-        if not compact_source:
+        with self._lock:
+            compact_source = compact_text(source_text)
+            if not compact_source:
+                return None
+            probe = compact_source[:80]
+            if book_id not in self.records_by_book:
+                return None
+            for chapter_index, base_records in self._chapters_for_book(book_id).items():
+                records = self.effective_records(base_records)
+                for position, record in enumerate(records):
+                    if probe in compact_text(record.text):
+                        return ReaderLocation(book_id=book_id, chapter_index=chapter_index, start_paragraph_index=record.paragraph_index, end_paragraph_index=record.paragraph_index)
+                    joined = compact_text("".join(item.text for item in records[position : position + 5]))
+                    if probe in joined:
+                        return ReaderLocation(
+                            book_id=book_id,
+                            chapter_index=chapter_index,
+                            start_paragraph_index=record.paragraph_index,
+                            end_paragraph_index=records[min(position + 4, len(records) - 1)].paragraph_index,
+                        )
             return None
-        probe = compact_source[:80]
-        for (candidate_id, chapter_index), base_records in self.chapters.items():
-            if candidate_id != book_id:
-                continue
-            records = self.effective_records(base_records)
-            for position, record in enumerate(records):
-                if probe in compact_text(record.text):
-                    return ReaderLocation(book_id=book_id, chapter_index=chapter_index, start_paragraph_index=record.paragraph_index, end_paragraph_index=record.paragraph_index)
-                joined = compact_text("".join(item.text for item in records[position : position + 5]))
-                if probe in joined:
-                    return ReaderLocation(
-                        book_id=book_id,
-                        chapter_index=chapter_index,
-                        start_paragraph_index=record.paragraph_index,
-                        end_paragraph_index=records[min(position + 4, len(records) - 1)].paragraph_index,
-                    )
-        return None
 
 
 def compact_text(text: str) -> str:

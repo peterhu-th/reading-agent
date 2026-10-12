@@ -1,4 +1,4 @@
-import { AlignJustify, Bot, Database, Library, Minus, Moon, Plus, Save, Search, Settings2, Sun, Undo2 } from "lucide-react";
+import { AlignJustify, Bot, Database, Library, Minus, Moon, NotebookPen, Plus, Save, Search, Settings2, Sun, Undo2 } from "lucide-react";
 import { useState } from "react";
 
 import type { EditorState, ReaderPreferences } from "../types";
@@ -11,19 +11,19 @@ interface Props {
   chatOpen: boolean;
   editorState: EditorState;
   saving: boolean;
+  toolsOpen: boolean;
+  hasBook: boolean;
   onLibrary: () => void;
   onChat: () => void;
   onPreferences: (value: ReaderPreferences) => void;
-  onSearch: (query: string) => void;
+  onTools: (tab: "annotations" | "search") => void;
   onUndo: () => void;
   onSave: () => void;
   onUpdateDatabase: () => void;
 }
 
-export function ReaderToolbar({ title, chapterTitle, progress, preferences, chatOpen, editorState, saving, onLibrary, onChat, onPreferences, onSearch, onUndo, onSave, onUpdateDatabase }: Props) {
+export function ReaderToolbar({ title, chapterTitle, progress, preferences, chatOpen, editorState, saving, toolsOpen, hasBook, onLibrary, onChat, onPreferences, onTools, onUndo, onSave, onUpdateDatabase }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [query, setQuery] = useState("");
   return (
     <header className="reader-toolbar">
       <button className="icon-button" onClick={onLibrary} title="书库与目录"><Library /></button>
@@ -34,15 +34,11 @@ export function ReaderToolbar({ title, chapterTitle, progress, preferences, chat
         <button aria-label="撤销" className="icon-button editor-action" disabled={!editorState.undo_count || editorState.database_updating} onClick={onUndo} title={editorState.last_operation ? `撤销：${editorState.last_operation}` : "撤销"}><Undo2 /><small>{editorState.undo_count || ""}</small></button>
         <button aria-label="保存" className="icon-button editor-action" disabled={!editorState.dirty || saving || editorState.database_updating} onClick={onSave} title="保存到 EPUB"><Save /></button>
         <button aria-label="更新数据库" className={`icon-button editor-action ${editorState.database_updating ? "is-updating" : ""}`} disabled={editorState.database_updating || saving} onClick={onUpdateDatabase} title="更新数据库"><Database /></button>
-        <button className="icon-button" onClick={() => setSearchOpen((value) => !value)} title="搜索当前章节"><Search /></button>
+        <button className={`icon-button tools-action ${toolsOpen ? "is-active" : ""}`} disabled={!hasBook || saving} onClick={() => onTools("annotations")} title="批注与书签" aria-label="批注与书签" aria-expanded={toolsOpen}><NotebookPen /></button>
+        <button className="icon-button tools-action" disabled={!hasBook || saving} onClick={() => onTools("search")} title="搜索全书" aria-label="搜索全书"><Search /></button>
         <button className="icon-button" onClick={() => setSettingsOpen((value) => !value)} title="阅读设置"><Settings2 /></button>
         <button className={`chat-toggle ${chatOpen ? "is-active" : ""}`} onClick={onChat}><Bot />{chatOpen ? "隐藏 AI" : "询问 AI"}</button>
       </div>
-      {searchOpen && (
-        <form className="toolbar-popover search-popover" onSubmit={(event) => { event.preventDefault(); onSearch(query); }}>
-          <Search /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索当前章节" /><button type="submit">查找</button>
-        </form>
-      )}
       {settingsOpen && (
         <div className="toolbar-popover settings-popover">
           <div><span>字号</span><button title="减小字号" onClick={() => onPreferences({ ...preferences, fontSize: Math.max(14, preferences.fontSize - 1) })}><Minus /></button><b>{preferences.fontSize}</b><button title="增大字号" onClick={() => onPreferences({ ...preferences, fontSize: Math.min(26, preferences.fontSize + 1) })}><Plus /></button></div>

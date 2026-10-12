@@ -105,6 +105,7 @@ def test_editor_clears_pre_save_undo_stack_after_save(tmp_path):
     reader = ReaderService(reader_path=reader_path, books_path=tmp_path / "missing.jsonl", chunks_path=tmp_path / "missing-chunks.jsonl")
     editor = EditorSessionService(reader)
     editor.annotation_path = annotation_path
+    editor.bookmark_path = tmp_path / "bookmarks.json"
     editor.epub_editor = EpubEditorService(tmp_path)
     editor.reset()
     targets = [item for item in records if item.text in {"保留正文", "删除正文"}]
@@ -139,6 +140,7 @@ def test_batch_delete_and_annotation_are_undoable(tmp_path):
     reader = ReaderService(reader_path=reader_path, books_path=tmp_path / "missing.jsonl", chunks_path=tmp_path / "missing-chunks.jsonl")
     editor = EditorSessionService(reader)
     editor.annotation_path = tmp_path / "annotations.json"
+    editor.bookmark_path = tmp_path / "bookmarks.json"
     editor.epub_editor = EpubEditorService(tmp_path)
     editor.reset()
     targets = [item for item in records if item.text in {"保留正文", "删除正文"}]
@@ -192,6 +194,7 @@ def test_chapter_delete_is_hidden_and_undoable(tmp_path):
     reader = ReaderService(reader_path=reader_path, books_path=tmp_path / "missing.jsonl", chunks_path=tmp_path / "missing-chunks.jsonl")
     editor = EditorSessionService(reader)
     editor.annotation_path = tmp_path / "annotations.json"
+    editor.bookmark_path = tmp_path / "bookmarks.json"
     editor.epub_editor = EpubEditorService(tmp_path)
     editor.reset()
     target = next(item for item in records if item.text == "保留正文")
@@ -229,6 +232,7 @@ def test_chapter_rename_updates_reader_epub_and_undo(tmp_path):
     reader = ReaderService(reader_path=reader_path, books_path=tmp_path / "missing.jsonl", chunks_path=tmp_path / "missing-chunks.jsonl")
     editor = EditorSessionService(reader)
     editor.annotation_path = tmp_path / "annotations.json"
+    editor.bookmark_path = tmp_path / "bookmarks.json"
     editor.epub_editor = EpubEditorService(tmp_path)
     editor.reset()
     target = next(item for item in records if item.text == "保留正文")
@@ -253,6 +257,7 @@ def open_editor(tmp_path):
     reader = ReaderService(reader_path=tmp_path / "reader.jsonl", books_path=tmp_path / "missing.jsonl", chunks_path=tmp_path / "missing-chunks.jsonl")
     editor = EditorSessionService(reader)
     editor.annotation_path = tmp_path / "annotations.json"
+    editor.bookmark_path = tmp_path / "bookmarks.json"
     editor.epub_editor = EpubEditorService(tmp_path)
     editor.reset()
     return reader, editor

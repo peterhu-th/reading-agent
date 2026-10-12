@@ -44,6 +44,7 @@ interface Props {
 
 export interface ReaderViewHandle {
   flush: () => Promise<void>;
+  currentParagraph: () => ReaderParagraph | null;
 }
 
 type FloatingSelection = TextSelection & { x: number; y: number };
@@ -98,6 +99,11 @@ export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderVie
   }, []);
   useImperativeHandle(ref, () => ({
     flush: commitEditorChanges,
+    currentParagraph: () => {
+      const element = visibleParagraph();
+      return editableChapter.current?.paragraphs.find((item) => item.edit_id === element?.dataset.editId)
+        ?? editableChapter.current?.paragraphs[0] ?? null;
+    },
   }));
 
   function captureSelection() {
@@ -183,12 +189,19 @@ export const ReaderView = forwardRef<ReaderViewHandle, Props>(function ReaderVie
   function trackProgress() {
     const container = scrollRef.current;
     if (!container || !page || !paragraphs.length) return;
-    const candidates = Array.from(container.querySelectorAll<HTMLElement>("[data-paragraph]"));
-    const visible = candidates.find((element) => element.getBoundingClientRect().bottom > 120) ?? candidates.at(-1);
+    const visible = visibleParagraph();
     const paragraph = Number(visible?.dataset.paragraph ?? paragraphs[0].paragraph_index);
     const chapterBase = page.chapter.chapter_index / Math.max(1, page.book.chapter_count);
     const paragraphPart = paragraph / Math.max(1, page.chapter.paragraph_count) / Math.max(1, page.book.chapter_count);
     onProgress(paragraph, Math.min(100, (chapterBase + paragraphPart) * 100));
+  }
+
+  function visibleParagraph() {
+    const container = scrollRef.current;
+    if (!container) return null;
+    const candidates = Array.from(container.querySelectorAll<HTMLElement>("[data-paragraph]"));
+    const top = container.getBoundingClientRect().top + 24;
+    return candidates.find((element) => element.getBoundingClientRect().bottom > top) ?? candidates.at(-1) ?? null;
   }
 
   async function addAnnotation(color: AnnotationColor) {
@@ -252,17 +265,23 @@ function renderAnnotatedText(paragraph: ReaderParagraph): string {
 }
 
 function annotationRange(paragraph: ReaderParagraph, annotation: ReaderAnnotation) {
+  // The API uses Unicode code points; DOM ranges and String.slice use UTF-16.
+  const characters = Array.from(paragraph.text);
   const start = paragraph.edit_id === annotation.start_edit_id ? annotation.start_offset : 0;
-  const end = paragraph.edit_id === annotation.end_edit_id ? annotation.end_offset : paragraph.text.length;
-  if (end <= start || start >= paragraph.text.length) return null;
-  return { start: Math.max(0, start), end: Math.min(paragraph.text.length, end), annotation };
+  const end = paragraph.edit_id === annotation.end_edit_id ? annotation.end_offset : characters.length;
+  if (end <= start || start >= characters.length) return null;
+  return {
+    start: characters.slice(0, Math.max(0, start)).join("").length,
+    end: characters.slice(0, Math.min(characters.length, end)).join("").length,
+    annotation,
+  };
 }
 
 function offsetWithin(element: HTMLElement, node: Node, offset: number): number {
   const range = document.createRange();
   range.selectNodeContents(element);
   try { range.setEnd(node, offset); } catch { return 0; }
-  return range.toString().length;
+  return Array.from(range.toString()).length;
 }
 
 function cleanEditableText(text: string): string {

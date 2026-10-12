@@ -2,10 +2,11 @@ import { act, fireEvent, render } from "@testing-library/react";
 
 import App from "./App";
 import { api } from "./api";
-import type { EditorState, ReaderBook, ReaderChapter, ReaderPage } from "./types";
+import type { EditorState, ReaderBook, ReaderChapter, ReaderLocation, ReaderPage } from "./types";
 
 vi.mock("./api", () => ({ api: {
   listBooks: vi.fn(), listChapters: vi.fn(), getChapter: vi.fn(), health: vi.fn(), editorState: vi.fn(), applyEditorOperation: vi.fn(), saveEditor: vi.fn(),
+  listAnnotations: vi.fn(), listBookmarks: vi.fn(), searchBook: vi.fn(), annotationLocation: vi.fn(), paragraphLocation: vi.fn(), addBookmark: vi.fn(), deleteChapter: vi.fn(),
 } }));
 vi.mock("./chat/ChatDrawer", () => ({ ChatDrawer: () => null }));
 
@@ -43,6 +44,10 @@ beforeEach(() => {
   vi.mocked(api.editorState).mockResolvedValue(state);
   vi.mocked(api.applyEditorOperation).mockResolvedValue({ ...state, dirty: true, undo_count: 1 });
   vi.mocked(api.saveEditor).mockResolvedValue(state);
+  vi.mocked(api.listAnnotations).mockResolvedValue({ items: [], total: 0, offset: 0, limit: 50, next_offset: null });
+  vi.mocked(api.listBookmarks).mockResolvedValue({ items: [], total: 0, offset: 0, limit: 50, next_offset: null });
+  vi.mocked(api.searchBook).mockResolvedValue({ items: [], total: 0, offset: 0, limit: 50, next_offset: null });
+  vi.mocked(api.deleteChapter).mockResolvedValue({ ...state, dirty: true });
 });
 
 afterEach(() => {
@@ -164,4 +169,62 @@ test("saving migrates the reading location and cancels the old progress timer be
   await act(async () => { refreshed = render(<App />); });
   expect(api.getChapter).toHaveBeenLastCalledWith("first-saved", 0, 0, 80, 0);
   expect(refreshed.getByText("第一本书第 1 章正文")).toBeInTheDocument();
+});
+
+test("whole-book search waits for pending edits and re-resolves a hit before highlighting it", async () => {
+  let finishEdit!: (value: EditorState) => void;
+  vi.mocked(api.applyEditorOperation).mockReturnValue(new Promise((resolve) => { finishEdit = resolve; }));
+  const target: ReaderLocation = { book_id: "first", chapter_index: 1, start_paragraph_index: 7, end_paragraph_index: 7 };
+  vi.mocked(api.searchBook).mockResolvedValue({ items: [{ book_id: "first", edit_id: "result", chapter_index: 1, chapter_title: "远处的章节", paragraph_index: 5, excerpt: "远处的匹配文字", reader_location: { ...target, start_paragraph_index: 5 } }], total: 1, offset: 0, limit: 50, next_offset: null });
+  vi.mocked(api.paragraphLocation).mockResolvedValue(target);
+  const view = await setup();
+  edit(view);
+  fireEvent.click(view.getByRole("button", { name: "搜索全书" }));
+  fireEvent.change(view.getByRole("textbox", { name: "搜索关键词" }), { target: { value: "匹配" } });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "查找" })); });
+  expect(api.searchBook).not.toHaveBeenCalled();
+  await act(async () => { finishEdit({ ...state, dirty: true }); });
+  expect(api.searchBook).toHaveBeenCalledWith("first", "匹配", undefined, 0, 50, expect.any(AbortSignal));
+  vi.mocked(api.getChapter).mockImplementation(async (_id, index, _offset, _limit, focus) => page(firstBook, index, focus));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: /远处的章节/ })); });
+  expect(api.paragraphLocation).toHaveBeenCalledWith("first", "result");
+  expect(api.getChapter).toHaveBeenLastCalledWith("first", 1, 0, 80, 7);
+  expect(view.container.querySelector('[data-paragraph="7"]')).toHaveClass("is-highlighted");
+});
+
+test("a delayed note location cannot replace a newer book navigation still loading", async () => {
+  const target: ReaderLocation = { book_id: "first", chapter_index: 1, start_paragraph_index: 0, end_paragraph_index: 0 };
+  vi.mocked(api.listAnnotations).mockResolvedValue({ items: [{
+    annotation_id: "note", book_id: "first", chapter_index: 1, chapter_title: "旧书批注", start_edit_id: "note-start", end_edit_id: "note-start", start_offset: 0, end_offset: 2,
+    selected_text: "正文", excerpt: "正文", quote: "正文", comment: "笔记", color: "yellow", created_at: "", updated_at: "", reader_location: target,
+  }], total: 1, offset: 0, limit: 50, next_offset: null });
+  let finishLocation!: (value: ReaderLocation) => void;
+  vi.mocked(api.annotationLocation).mockReturnValue(new Promise((resolve) => { finishLocation = resolve; }));
+  const view = await setup();
+  const block = view.container.querySelector<HTMLElement>(".reader-block")!;
+  Object.defineProperty(block, "innerText", { configurable: true, get: () => block.textContent });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "批注与书签" })); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "定位原文" })); });
+  let finishChapters!: (value: ReaderChapter[]) => void;
+  vi.mocked(api.listChapters).mockReturnValueOnce(new Promise((resolve) => { finishChapters = resolve; }));
+  await act(async () => { fireEvent.click(view.getByText("另一本书")); });
+  await act(async () => { finishLocation(target); });
+  expect(api.getChapter).toHaveBeenCalledTimes(1);
+  await act(async () => { finishChapters([chapter(otherBook, 0)]); });
+  expect(api.getChapter).toHaveBeenLastCalledWith("other", 0, 0, 80, undefined);
+  expect(view.getByText("另一本书第 1 章正文")).toBeInTheDocument();
+});
+
+test.each([false, true])("deleting a chapter refreshes note lists even without a replacement navigation (last=%s)", async (last) => {
+  vi.mocked(api.health).mockResolvedValue({ status: "ok", editor_capabilities: ["chapter_delete"], answer_api_healthy: false, answer_provider_ready: false, chunk_index_exists: true, chunks_exist: true, embedding_model_exists: true, reranker_model_exists: true });
+  if (last) vi.mocked(api.listChapters).mockResolvedValueOnce([chapter(firstBook, 0)]).mockResolvedValue([]);
+  const view = await setup();
+  const block = view.container.querySelector<HTMLElement>(".reader-block")!;
+  Object.defineProperty(block, "innerText", { configurable: true, get: () => block.textContent });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "批注与书签" })); });
+  expect(api.listAnnotations).toHaveBeenCalledTimes(1);
+  fireEvent.click(view.getByRole("button", { name: /^目录$/ }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: `删除章节：第 ${last ? 1 : 2} 章` })); });
+  expect(api.deleteChapter).toHaveBeenCalledWith("first", last ? 0 : 1);
+  expect(api.listAnnotations).toHaveBeenCalledTimes(2);
 });

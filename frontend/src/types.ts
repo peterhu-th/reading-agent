@@ -73,6 +73,39 @@ export interface ReaderAnnotation {
   updated_at: string;
 }
 
+export interface ReaderAnnotationItem extends ReaderAnnotation {
+  chapter_title: string;
+  excerpt: string;
+  quote: string;
+  reader_location: ReaderLocation | null;
+}
+
+export interface ReaderBookmark {
+  bookmark_id: string;
+  book_id: string;
+  chapter_index: number;
+  edit_id: string;
+  label: string;
+  created_at: string;
+}
+
+export interface ReaderBookmarkItem extends ReaderBookmark {
+  chapter_title: string;
+  excerpt: string;
+  quote: string;
+  reader_location: ReaderLocation | null;
+}
+
+export interface ReaderResultPage<T> {
+  items: T[];
+  total: number;
+  offset: number;
+  limit: number;
+  next_offset: number | null;
+}
+
+export type NotesExportFormat = "markdown" | "json";
+
 export interface ReaderMutation {
   edit_id: string;
   text: string;
@@ -106,10 +139,13 @@ export interface ReaderPage {
 }
 
 export interface ReaderSearchHit {
+  book_id: string;
+  edit_id: string;
   chapter_index: number;
   chapter_title: string;
   paragraph_index: number;
   excerpt: string;
+  reader_location: ReaderLocation;
 }
 
 export interface RetrievalTrace {

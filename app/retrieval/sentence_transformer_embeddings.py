@@ -1,14 +1,12 @@
-import os
 from functools import cached_property
-
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+from typing import TYPE_CHECKING
 
 from langchain_core.embeddings import Embeddings
-from sentence_transformers import SentenceTransformer
-from transformers.utils import logging as transformers_logging
 
+from app.retrieval.model_runtime import get_embedding_model
 
-transformers_logging.disable_progress_bar()
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 
 class SentenceTransformerEmbeddings(Embeddings):
@@ -32,11 +30,11 @@ class SentenceTransformerEmbeddings(Embeddings):
         self.local_files_only = local_files_only
 
     @cached_property
-    def model(self) -> SentenceTransformer:
-        return SentenceTransformer(
+    def model(self) -> "SentenceTransformer":
+        return get_embedding_model(
             self.model_name,
-            device=self.device,
-            local_files_only=self.local_files_only,
+            self.device,
+            self.local_files_only,
         )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:

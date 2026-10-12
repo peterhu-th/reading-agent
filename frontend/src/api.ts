@@ -1,15 +1,27 @@
-import type { AnnotationColor, DatabaseUpdateState, EditorState, HealthStatus, ReaderAnnotation, ReaderBook, ReaderChapter, ReaderMutation, ReaderPage, ReaderSearchHit, Session, ChatScope } from "./types";
+import type { AnnotationColor, DatabaseUpdateState, EditorState, HealthStatus, NotesExportFormat, ReaderAnnotation, ReaderAnnotationItem, ReaderBook, ReaderBookmark, ReaderBookmarkItem, ReaderChapter, ReaderLocation, ReaderMutation, ReaderPage, ReaderResultPage, ReaderSearchHit, Session, ChatScope } from "./types";
 
-async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
+async function request(url: string, options?: RequestInit): Promise<Response> {
   const response = await fetch(url, options);
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     if (response.status === 405) {
       throw new Error("当前 Web 后端仍是旧版本，尚未加载此操作。请停止服务后重新运行 python scripts/run_web.py。");
     }
-    throw new Error(body.detail ?? `请求失败：${response.status}`);
+    const detail = Array.isArray(body.detail) ? body.detail.map((item: { msg: string }) => item.msg).join("；") : body.detail;
+    throw new Error(detail ?? `请求失败：${response.status}`);
   }
+  return response;
+}
+
+async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await request(url, options);
   return response.json() as Promise<T>;
+}
+
+const bookRoute = (id: string) => `/api/reader/books/${encodeURIComponent(id)}`;
+
+function pageQuery(offset: number, limit: number) {
+  return new URLSearchParams({ offset: String(offset), limit: String(limit) });
 }
 
 export const api = {
@@ -21,10 +33,34 @@ export const api = {
     if (focus !== undefined) params.set("focus_paragraph", String(focus));
     return requestJson<ReaderPage>(`/api/reader/books/${id}/chapters/${chapter}?${params}`);
   },
-  searchBook: (id: string, query: string, chapter?: number) => {
-    const params = new URLSearchParams({ q: query });
+  searchBook: (id: string, query: string, chapter?: number, offset = 0, limit = 50, signal?: AbortSignal) => {
+    const params = pageQuery(offset, limit);
+    params.set("q", query);
     if (chapter !== undefined) params.set("chapter_index", String(chapter));
-    return requestJson<ReaderSearchHit[]>(`/api/reader/books/${id}/search?${params}`);
+    return requestJson<ReaderResultPage<ReaderSearchHit>>(`${bookRoute(id)}/search?${params}`, { signal });
+  },
+  listAnnotations: (id: string, offset = 0, limit = 50, signal?: AbortSignal) =>
+    requestJson<ReaderResultPage<ReaderAnnotationItem>>(`${bookRoute(id)}/annotations?${pageQuery(offset, limit)}`, { signal }),
+  listBookmarks: (id: string, offset = 0, limit = 50, signal?: AbortSignal) =>
+    requestJson<ReaderResultPage<ReaderBookmarkItem>>(`${bookRoute(id)}/bookmarks?${pageQuery(offset, limit)}`, { signal }),
+  annotationLocation: (bookId: string, id: string) => requestJson<ReaderLocation>(`${bookRoute(bookId)}/annotations/${encodeURIComponent(id)}/location`),
+  bookmarkLocation: (bookId: string, id: string) => requestJson<ReaderLocation>(`${bookRoute(bookId)}/bookmarks/${encodeURIComponent(id)}/location`),
+  paragraphLocation: (bookId: string, editId: string) => requestJson<ReaderLocation>(`${bookRoute(bookId)}/paragraphs/${encodeURIComponent(editId)}/location`),
+  addBookmark: (bookId: string, input: { chapter_index: number; edit_id: string; label: string }) =>
+    requestJson<{ bookmark: ReaderBookmark; state: EditorState }>(`${bookRoute(bookId)}/bookmarks`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+    }),
+  deleteBookmark: (bookId: string, id: string) => requestJson<EditorState>(`${bookRoute(bookId)}/bookmarks/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  updateAnnotation: (bookId: string, id: string, input: { comment?: string; color?: AnnotationColor }) =>
+    requestJson<{ annotation: ReaderAnnotation; state: EditorState }>(`${bookRoute(bookId)}/annotations/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+    }),
+  exportNotes: async (bookId: string, format: NotesExportFormat) => {
+    const response = await request(`${bookRoute(bookId)}/notes/export?${new URLSearchParams({ format })}`);
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1];
+    const filename = encoded ? decodeURIComponent(encoded) : /filename="([^"]+)"/i.exec(disposition)?.[1] ?? `notes.${format === "markdown" ? "md" : "json"}`;
+    return { blob: await response.blob(), filename };
   },
   editorState: () => requestJson<EditorState>("/api/editor/state"),
   applyEditorOperation: (bookId: string, label: string, mutations: ReaderMutation[]) => requestJson<EditorState>("/api/editor/operations", {
@@ -42,12 +78,13 @@ export const api = {
     selected_text: string;
     color: AnnotationColor;
     comment: string;
-  }) => requestJson<{ annotation: ReaderAnnotation; state: EditorState }>("/api/editor/annotations", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  }),
-  deleteAnnotation: (id: string) => requestJson<EditorState>(`/api/editor/annotations/${id}`, { method: "DELETE" }),
+  }) => {
+    const { book_id, ...payload } = input;
+    return requestJson<{ annotation: ReaderAnnotation; state: EditorState }>(`${bookRoute(book_id)}/annotations`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+  },
+  deleteAnnotation: (bookId: string, id: string) => requestJson<EditorState>(`${bookRoute(bookId)}/annotations/${encodeURIComponent(id)}`, { method: "DELETE" }),
   deleteChapter: (bookId: string, chapterIndex: number) => requestJson<EditorState>(`/api/editor/books/${bookId}/chapters/${chapterIndex}/delete`, { method: "POST" }),
   renameChapter: (bookId: string, chapterIndex: number, title: string) => requestJson<EditorState>(`/api/editor/books/${bookId}/chapters/${chapterIndex}/rename`, {
     method: "POST",

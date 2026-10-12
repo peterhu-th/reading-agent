@@ -16,6 +16,7 @@ from app.ingestion.epub_source import (
     file_sha256,
     make_book_id,
     normalize_inline_text,
+    parse_epub_html,
     read_epub_file,
 )
 from app.models.schemas import ReaderContentRecord
@@ -94,7 +95,7 @@ def extract_reader_chapters(book: epub.EpubBook, book_type: str = "fiction") -> 
     note_blocks: list[ReaderBlock] = []
     unnamed_index = 1
     for document in extract_html_documents(book):
-        soup = BeautifulSoup(document["html"], "lxml")
+        soup = parse_epub_html(document["html"])
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
         blocks = extract_reader_blocks(

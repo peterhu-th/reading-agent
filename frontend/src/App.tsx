@@ -1,4 +1,4 @@
-import { Bot, Search, X } from "lucide-react";
+import { Bot, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
@@ -6,8 +6,9 @@ import { api } from "./api";
 import { ChatDrawer } from "./chat/ChatDrawer";
 import { LibrarySidebar } from "./library/LibrarySidebar";
 import { ReaderToolbar } from "./reader/ReaderToolbar";
+import { ReaderToolsPanel, type BookmarkTarget, type NoteMutationResult, type ReaderToolTab } from "./reader/ReaderToolsPanel";
 import { ReaderView, type ReaderEditTarget, type ReaderViewHandle, type TextSelection } from "./reader/ReaderView";
-import type { AnnotationColor, EditorState, HealthStatus, ReaderBook, ReaderChapter, ReaderLocation, ReaderMutation, ReaderPage, ReaderParagraph, ReaderPreferences, ReaderSearchHit } from "./types";
+import type { AnnotationColor, EditorState, HealthStatus, ReaderBook, ReaderChapter, ReaderLocation, ReaderMutation, ReaderPage, ReaderParagraph, ReaderPreferences } from "./types";
 
 const DEFAULT_PREFERENCES: ReaderPreferences = { fontSize: 18, lineHeight: 1.9, width: "medium", theme: "light" };
 const DEFAULT_EDITOR_STATE: EditorState = { dirty: false, undo_count: 0, last_operation: "", database_updating: false, database_status: "idle", database_message: "" };
@@ -39,8 +40,9 @@ export default function App() {
   const [highlightParagraph, setHighlightParagraph] = useState<number | null>(null);
   const [selection, setSelection] = useState<TextSelection | null>(null);
   const [suggestedQuestion, setSuggestedQuestion] = useState("");
-  const [searchResults, setSearchResults] = useState<ReaderSearchHit[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [toolsTab, setToolsTab] = useState<ReaderToolTab | null>(null);
+  const [toolsRevision, setToolsRevision] = useState(0);
+  const [notesBusy, setNotesBusy] = useState(false);
   const [editorState, setEditorState] = useState<EditorState>(DEFAULT_EDITOR_STATE);
   const [saving, setSaving] = useState(false);
   const [contentRevision, setContentRevision] = useState(0);
@@ -49,6 +51,7 @@ export default function App() {
   const readerRequest = useRef(0);
   const readingPending = useRef(false);
   const savePending = useRef(false);
+  const notesPending = useRef(false);
 
   const activeChapter = useMemo(
     () => chapters.find((item) => item.chapter_index === page?.chapter.chapter_index) ?? page?.chapter ?? null,
@@ -69,13 +72,13 @@ export default function App() {
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (searchResults.length) setSearchResults([]);
+      if (toolsTab) setToolsTab(null);
       else if (chatOpen) setChatOpen(false);
       else setLibraryOpen(false);
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [chatOpen, searchResults]);
+  }, [chatOpen, toolsTab]);
   useEffect(() => {
     if (!editorState.database_updating) return;
     const timer = window.setInterval(() => {
@@ -103,7 +106,7 @@ export default function App() {
   }
 
   async function openBook(nextBook: ReaderBook, chapterOverride?: number, paragraphOverride?: number) {
-    if (savePending.current) return;
+    if (savePending.current || notesPending.current) return;
     const request = ++readerRequest.current;
     readingPending.current = true;
     setLoading(true);
@@ -140,13 +143,13 @@ export default function App() {
     setContentRevision((current) => current + 1);
     setSelection(null);
     setSuggestedQuestion("");
-    setSearchResults([]);
+    setToolsRevision((value) => value + 1);
     setHighlightParagraph(focusParagraph ?? null);
     if (focusParagraph !== undefined) window.setTimeout(() => setHighlightParagraph(null), 2600);
   }
 
   async function loadChapter(targetBook: ReaderBook, chapterIndex: number, focusParagraph?: number) {
-    if (savePending.current) return;
+    if (savePending.current || notesPending.current) return;
     const request = ++readerRequest.current;
     readingPending.current = true;
     setLoading(true);
@@ -174,7 +177,7 @@ export default function App() {
   }
 
   async function loadMore() {
-    if (!book || !page || page.next_offset === null || readingPending.current || savePending.current) return;
+    if (!book || !page || page.next_offset === null || readingPending.current || savePending.current || notesPending.current) return;
     const request = ++readerRequest.current;
     readingPending.current = true;
     setLoading(true);
@@ -212,16 +215,42 @@ export default function App() {
     saveTimer.current = null;
   }
 
-  async function searchChapter(query: string) {
-    if (!book || !page || !query.trim()) return;
-    setSearchQuery(query);
-    setSearchResults(await api.searchBook(book.book_id, query.trim(), page.chapter.chapter_index));
+  async function flushForTools() {
+    if (savePending.current || readingPending.current || notesPending.current) throw new Error("正文正在更新，请稍后重试。");
+    const request = readerRequest.current;
+    await readerViewRef.current?.flush();
+    if (request !== readerRequest.current) throw new Error("阅读位置已变化，请重试。");
+    return request;
   }
 
-  async function jumpToSearch(hit: ReaderSearchHit) {
-    if (!book) return;
-    await loadChapter(book, hit.chapter_index, hit.paragraph_index);
-    setSearchResults([]);
+  async function locateFromTools(location: ReaderLocation, navigationVersion: number) {
+    if (navigationVersion !== readerRequest.current || readingPending.current) throw new Error("阅读位置已变化，请重新定位。");
+    await jumpToCitation(location);
+    if (window.innerWidth <= 1180) setToolsTab(null);
+  }
+
+  async function mutateNotes(action: (current: BookmarkTarget | null) => Promise<NoteMutationResult>) {
+    if (savePending.current || readingPending.current || notesPending.current) throw new Error("正文正在更新，请稍后重试。");
+    notesPending.current = true;
+    setNotesBusy(true);
+    try {
+      await readerViewRef.current?.flush();
+      const current = readerViewRef.current?.currentParagraph();
+      const result = await action(current && page ? { chapter_index: page.chapter.chapter_index, edit_id: current.edit_id } : null);
+      setEditorState(result.state);
+      if (result.annotation || result.deletedAnnotationId) {
+        setParagraphs((items) => items.map((item) => ({
+          ...item,
+          annotations: item.annotations.filter((annotation) => annotation.annotation_id !== result.deletedAnnotationId)
+            .map((annotation) => annotation.annotation_id === result.annotation?.annotation_id ? result.annotation : annotation),
+        })));
+        setContentRevision((value) => value + 1);
+      }
+      setToolsRevision((value) => value + 1);
+    } finally {
+      notesPending.current = false;
+      setNotesBusy(false);
+    }
   }
 
   async function jumpToCitation(location: ReaderLocation) {
@@ -246,6 +275,7 @@ export default function App() {
         if (!mutation) return [paragraph];
         return mutation.deleted ? [] : [{ ...paragraph, text: mutation.text }];
       }));
+      setToolsRevision((value) => value + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "正文修改失败");
       throw caught;
@@ -253,7 +283,7 @@ export default function App() {
   }
 
   async function deleteChapter(chapter: ReaderChapter) {
-    if (!book || savePending.current) return;
+    if (!book || savePending.current || notesPending.current) return;
     setError("");
     if (!health?.editor_capabilities?.includes("chapter_delete")) {
       setError("当前 Web 后端仍是旧版本，尚未加载章节删除接口。请停止服务后重新运行 python scripts/run_web.py。");
@@ -267,6 +297,7 @@ export default function App() {
       setBooks(nextBooks);
       setBook(nextBook);
       setChapters(nextChapters);
+      setToolsRevision((value) => value + 1);
       if (page?.chapter.chapter_index !== chapter.chapter_index) return;
       const replacement = nextChapters.find((item) => item.chapter_index > chapter.chapter_index) ?? nextChapters.at(-1);
       if (replacement) await loadChapter(nextBook, replacement.chapter_index);
@@ -281,7 +312,7 @@ export default function App() {
   }
 
   async function renameChapter(chapter: ReaderChapter, title: string) {
-    if (!book || savePending.current) return;
+    if (!book || savePending.current || notesPending.current) return;
     setError("");
     if (!health?.editor_capabilities?.includes("chapter_rename")) {
       setError("当前 Web 后端仍是旧版本，尚未加载章节改名接口。请停止服务后重新运行 python scripts/run_web.py。");
@@ -292,6 +323,7 @@ export default function App() {
       setEditorState(await api.renameChapter(book.book_id, chapter.chapter_index, title));
       const nextChapters = await api.listChapters(book.book_id);
       setChapters(nextChapters);
+      setToolsRevision((value) => value + 1);
       const renamed = nextChapters.find((item) => item.chapter_index === chapter.chapter_index);
       if (renamed && page?.chapter.chapter_index === chapter.chapter_index) {
         setPage((current) => current ? { ...current, chapter: renamed } : current);
@@ -302,7 +334,9 @@ export default function App() {
   }
 
   async function addAnnotation(nextSelection: TextSelection, color: AnnotationColor, comment: string) {
-    if (!book || !page || savePending.current) return;
+    if (!book || !page || savePending.current || notesPending.current) return;
+    notesPending.current = true;
+    setNotesBusy(true);
     try {
       const result = await api.addAnnotation({
         book_id: book.book_id,
@@ -318,13 +352,17 @@ export default function App() {
       setEditorState(result.state);
       setParagraphs((current) => current.map((paragraph) => paragraph.paragraph_index >= nextSelection.paragraphs[0] && paragraph.paragraph_index <= nextSelection.paragraphs[1] ? { ...paragraph, annotations: [...paragraph.annotations, result.annotation] } : paragraph));
       setContentRevision((current) => current + 1);
+      setToolsRevision((value) => value + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "批注保存失败");
+    } finally {
+      notesPending.current = false;
+      setNotesBusy(false);
     }
   }
 
   async function undoEditor() {
-    if (!book || savePending.current) return;
+    if (!book || savePending.current || notesPending.current) return;
     try {
       await readerViewRef.current?.flush();
       setEditorState(await api.undoEditor());
@@ -344,7 +382,7 @@ export default function App() {
   }
 
   async function saveEditor() {
-    if (savePending.current || readingPending.current) return;
+    if (savePending.current || readingPending.current || notesPending.current) return;
     savePending.current = true;
     setSaving(true);
     let saved = false;
@@ -392,7 +430,7 @@ export default function App() {
   }
 
   async function updateDatabase() {
-    if (savePending.current) return;
+    if (savePending.current || notesPending.current) return;
     try {
       await readerViewRef.current?.flush();
       const state = await api.startDatabaseUpdate();
@@ -406,14 +444,14 @@ export default function App() {
     <div className={`reader-app theme-${preferences.theme} ${libraryOpen ? "library-visible" : ""} ${chatOpen ? "chat-visible" : ""}`} style={{ "--chat-width": `${chatWidth}px` } as CSSProperties}>
       <LibrarySidebar open={libraryOpen} books={books} chapters={chapters} activeBookId={book?.book_id ?? ""} activeChapter={page?.chapter.chapter_index ?? null} onClose={() => setLibraryOpen(false)} onBook={(value) => void openBook(value)} onChapter={(value) => void selectChapter(value)} onRenameChapter={(chapter, title) => void renameChapter(chapter, title)} onDeleteChapter={(value) => void deleteChapter(value)} />
       <main className="reader-main">
-        <ReaderToolbar title={book?.title ?? ""} chapterTitle={activeChapter?.chapter_title ?? ""} progress={progress} preferences={preferences} chatOpen={chatOpen} editorState={editorState} saving={saving} onLibrary={() => setLibraryOpen((value) => !value)} onChat={() => setChatOpen((value) => !value)} onPreferences={setPreferences} onSearch={(query) => void searchChapter(query)} onUndo={() => void undoEditor()} onSave={() => void saveEditor()} onUpdateDatabase={() => void updateDatabase()} />
-        <ReaderView ref={readerViewRef} book={book} page={page} paragraphs={paragraphs} preferences={preferences} loading={loading} readOnly={saving} contentRevision={contentRevision} highlightParagraph={highlightParagraph} onChapter={(value) => void selectChapter(value)} onLoadMore={() => void loadMore()} onProgress={saveProgress} onAskSelection={askSelection} onEdit={applyEdits} onAnnotate={addAnnotation} onUndo={undoEditor} />
+        <ReaderToolbar title={book?.title ?? ""} chapterTitle={activeChapter?.chapter_title ?? ""} progress={progress} preferences={preferences} chatOpen={chatOpen} editorState={editorState} saving={saving || notesBusy} hasBook={!!book} toolsOpen={toolsTab !== null} onLibrary={() => setLibraryOpen((value) => !value)} onChat={() => setChatOpen((value) => !value)} onPreferences={setPreferences} onTools={setToolsTab} onUndo={() => void undoEditor()} onSave={() => void saveEditor()} onUpdateDatabase={() => void updateDatabase()} />
+        <ReaderView ref={readerViewRef} book={book} page={page} paragraphs={paragraphs} preferences={preferences} loading={loading} readOnly={saving || notesBusy} contentRevision={contentRevision} highlightParagraph={highlightParagraph} onChapter={(value) => void selectChapter(value)} onLoadMore={() => void loadMore()} onProgress={saveProgress} onAskSelection={askSelection} onEdit={applyEdits} onAnnotate={addAnnotation} onUndo={undoEditor} />
+        {book && toolsTab && <ReaderToolsPanel key={book.book_id} book={book} chapterIndex={activeChapter?.chapter_index ?? null} tab={toolsTab} revision={toolsRevision} disabled={saving || notesBusy || loading || editorState.database_updating} dirty={editorState.dirty} onTab={setToolsTab} onClose={() => setToolsTab(null)} onFlush={flushForTools} onLocate={locateFromTools} onMutation={mutateNotes} />}
         {error && <div className="global-error">{error}<button onClick={() => setError("")}><X /></button></div>}
         {editorState.database_message && editorState.database_status !== "idle" && <div className={`database-status status-${editorState.database_status}`}>{editorState.database_message}</div>}
         {!chatOpen && <button className="floating-chat" onClick={() => setChatOpen(true)} title="打开阅读助理"><Bot /></button>}
       </main>
       <ChatDrawer open={chatOpen} width={chatWidth} health={health} book={book} chapter={activeChapter} selection={selection} suggestedQuestion={suggestedQuestion} onClose={() => setChatOpen(false)} onWidth={setChatWidth} onCitation={(location) => void jumpToCitation(location)} onSelectionConsumed={() => { setSelection(null); setSuggestedQuestion(""); }} />
-      {searchResults.length > 0 && <div className="search-results"><header><Search /><strong>“{searchQuery}”的结果</strong><button onClick={() => setSearchResults([])}><X /></button></header>{searchResults.map((hit) => <button key={`${hit.chapter_index}:${hit.paragraph_index}`} onClick={() => void jumpToSearch(hit)}><span>{hit.chapter_title} · 段落 {hit.paragraph_index}</span><p>{hit.excerpt}</p></button>)}</div>}
       {(libraryOpen || chatOpen) && <button className="mobile-scrim" onClick={() => { setLibraryOpen(false); setChatOpen(false); }} aria-label="关闭面板" />}
     </div>
   );

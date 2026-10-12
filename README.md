@@ -54,7 +54,7 @@ reading-memory-agent/
 │  ├─ rebuild_index.py       # 重建或增量更新 chunk 向量索引
 │  ├─ build_summaries.py     # 离线生成或增量更新摘要
 │  ├─ rebuild_summary_index.py
-│  ├─ update_database.py     # 顺序更新阅读数据、检索索引和摘要索引
+│  ├─ update_database.py     # 单进程增量更新阅读数据、摘要与向量索引
 │  ├─ run_cli.py             # 启动命令行阅读助理
 │  ├─ run_web.py             # 只启动 Web 阅读器
 │  ├─ run_all.py             # 启动模型网关后再启动阅读器
@@ -140,6 +140,8 @@ RERANK_DEVICE=cpu
 ```
 
 `local-hash` 是确定性的轻量 embedding，不等价于 BGE 语义模型。仅需把 BGE 放在 CPU 上运行时，请保留 `EMBEDDING_BACKEND=sentence-transformers`，只把 `EMBEDDING_DEVICE` 和 `RERANK_DEVICE` 改为 `cpu`。
+
+本地 embedding 和 cross-encoder 权重在首次使用时加载，并在同一进程内按模型类别、模型路径、设备和本地加载选项复用。正文检索与摘要检索共享相同配置的 embedding，多轮重排复用 cross-encoder；并发首次请求也只构造一次模型。不同进程仍独立加载，配置变更或原路径下替换模型文件后应重启服务以释放旧模型并载入新权重。
 
 ## 配置
 
@@ -234,7 +236,7 @@ python scripts/evaluate_retrieval.py
 - `build_reader_library.py`：按 EPUB 自带目录生成无损阅读数据，保留短诗行、篇名、注释等全部可读文本。
 - `rebuild_index.py`：增量更新 Chroma chunk 向量索引。集合保存 embedding 后端、模型和归一化配置；配置相同且内容与元数据未变化的 chunk 会跳过，只为新增或变化的 chunk 计算向量，并删除已经消失的旧条目。切换模型或旧集合缺少模型配置时会全量重建，即使新旧模型维度相同。空 JSONL 会清空对应集合；缺少输入文件会报错。
 - `build_summaries.py`：生成章节摘要和全书摘要；相同 source hash 会跳过。
-- `rebuild_summary_index.py`：构建摘要向量索引，使用同样的模型迁移和过期条目清理流程。
+- `rebuild_summary_index.py`：增量同步摘要向量索引，正文和元数据相同的摘要复用已有向量；保留模型迁移和过期条目清理流程。
 - `evaluate_retrieval.py`：运行固定问题集，检查检索是否能返回合理来源。
 
 ## 运行 CLI
@@ -282,17 +284,27 @@ python scripts/run_all.py
 
 Web 首屏是阅读器：左侧书库/目录可隐藏，中间显示完整正文，右侧聊天可隐藏并可调宽度。正文始终可以像文字处理器一样直接选中、输入和删除；跨段选择后删除会作为一次批量操作记录。输入期间不会因后台同步抢走当前选区或把光标移到章节开头。
 
-选中文字会弹出工具条，可添加四色高亮和批注，也可以直接要求 AI 解释或分析选文。目录中的删除按钮可以整章删除；单击铅笔或双击章节名称可进入重命名，按 `Enter` 或勾选按钮确认，按 `Esc` 取消。章节名称保存时会写入 EPUB 3 Nav 和 EPUB 2 NCX 目录；正文中原有的章节标题文字不会自动跟随更名。
+选中文字会弹出工具条，可添加四色高亮和批注，也可以直接要求 AI 解释或分析选文。阅读工具面板提供批注列表、书签和关键词搜索：可修改批注备注与颜色、删除批注，或为当前阅读段落添加书签；点击列表条目会跳转并短暂高亮原文。搜索默认覆盖整本书，也可限定当前章，以包含关键词的段落为一条结果，支持分页。
+
+工具面板可将当前书籍全部批注和书签导出为 Markdown 或 JSON，包含书名、作者、章节、完整引文、备注、时间和位置。导出前会同步正在输入的正文，导出文件标明是否有未保存的编辑；导出不会替代“保存”。书签位置和批注范围按段落标识解析，原文失效时明确标记，避免同文段落误跳。
+
+目录中的删除按钮可以整章删除；单击铅笔或双击章节名称可进入重命名，按 `Enter` 或勾选按钮确认，按 `Esc` 取消。章节名称保存时会写入 EPUB 3 Nav 和 EPUB 2 NCX 目录；正文中原有的章节标题文字不会自动跟随更名。
 
 顶部的“撤销”“保存”“更新数据库”是三个独立操作：
 
-- “撤销”覆盖本次服务启动后、上次成功保存之后的全部正文、章节删除、章节名称和批注操作。刷新浏览器不会清空历史；保存成功或重启服务时清空。
-- “保存”先提交当前未同步的输入，暂存修改后的 EPUB 并重读节点定位，迁移批注后统一替换 EPUB、`reader.jsonl` 和批注文件。替换发生 I/O 错误时恢复已替换文件；保存成功后刷新目录、正文与编辑位置并清空此前撤销历史，失败时保留未保存状态和撤销历史。
+- “撤销”覆盖本次服务启动后、上次成功保存之后的全部正文、章节删除、章节名称、批注和书签操作。刷新浏览器不会清空历史；保存成功或重启服务时清空。
+- “保存”先提交当前未同步的输入，暂存修改后的 EPUB 并重读节点定位，迁移批注和书签后统一替换 EPUB、`reader.jsonl`、批注和书签文件。替换发生 I/O 错误时恢复已替换文件；保存成功后刷新目录、正文与编辑位置并清空此前撤销历史，失败时保留未保存状态和撤销历史。删除正文或章节会同时删除对应批注和书签，保存前可撤销恢复。
 - “更新数据库”运行完整的数据更新流程，不会自动保存当前编辑。存在未保存修改时，界面会明确提示本次更新不包含这些内容；任务完成后重启 Web 服务即可载入新书目。
 
-阅读位置和显示偏好保存在浏览器本地，会话与编辑撤销历史保存在后端内存中，后端重启后会清空。批注持久化到 `data/user/annotations.json`。回答引用可以跳回对应章节。
+阅读位置和显示偏好保存在浏览器本地，会话与编辑撤销历史保存在后端内存中，后端重启后会清空。点击“保存”后，批注持久化到 `data/user/annotations.json`，书签持久化到 `data/user/bookmarks.json`（可通过 `BOOKMARKS_JSON_PATH` 配置）。回答引用可以跳回对应章节。
 
-新增、替换 EPUB 后，可点击“更新数据库”，或运行 `python scripts/update_database.py`，完整更新检索库、摘要库和阅读器书库。脚本会自动调用 `ingest_books.py` 与 `build_reader_library.py`：二者使用相同的目录锚点和段落解析，分别生成用于 RAG 的清洗数据和完整阅读文本。Web 服务启动时会从当前 `reader.jsonl` 载入书库，因此数据库更新完成后需要重启服务，新书目才会出现在前端。
+阅读器按书籍缓存目录元数据、段落数量及前后章位置，分页复用目录计算结果。正文修改、章节删除或改名、撤销和保存只使受影响书籍的缓存失效，其他书籍继续复用已有缓存。批注按章节和原始段落位置建立索引，分页直接取得覆盖该段的批注；编辑、撤销和保存后的定位迁移同步更新索引。保存与撤销仍作用于整个编辑会话，持久化文件格式不变。
+
+新增、替换或删除 EPUB 后，可点击“更新数据库”，或运行 `python scripts/update_database.py`。总脚本在同一进程内增量更新阅读数据、摘要和两个向量索引，共享已加载的 embedding。一本 EPUB 只解析一次，同时生成完整阅读文本与 RAG 数据；未改书籍复用已有记录，分块参数变化时只重新分块。默认输出阶段汇总，不逐书、逐批打印；完全无变化时只检查文件和配置，跳过 JSONL 读写、摘要分析与模型加载。
+
+首次运行会在阅读数据目录生成 `library_update_state.json` 和 `database_update_state.json`，记录文件大小、纳秒修改时间和相关配置。之后只处理新增、变化及删除的书籍；摘要无待更新内容时不创建 LLM 客户端，不变的正文与摘要向量均复用。缺失产物、模型或摘要配置变化会重新执行必要阶段；阶段失败后可直接重试。更新记录不包含 API 密钥。Web 服务启动时从当前 `reader.jsonl` 载入书库，更新完成后仍需重启服务。
+
+需要排查时运行 `python scripts/update_database.py --verbose` 查看详情。外部工具同时保留 EPUB 的大小与修改时间，或修改了解析规则时，运行 `python scripts/update_database.py --force` 重新解析并检查全部阶段；相同向量仍然复用。摘要生成规则变更时同时更新 `SUMMARY_PROMPT_VERSION`。同一书库应只运行一个数据库更新进程。
 
 从使用独立 RAG 章节编号的旧版本升级时，需要完整运行一次“更新数据库”并重启服务，使已有 chunk、摘要和阅读数据采用同一套位置。更新前先保存编辑；首次迁移旧向量集合会重新计算 embedding。
 
@@ -326,6 +338,30 @@ CLI 命令：
 我最近很焦虑，有没有书里的片段能回应这种状态？
 只根据《百年孤独》回答，布恩迪亚家族的循环体现在哪里？
 ```
+
+## 阅读工具 API
+
+接口按书籍组织，基路径为 `/api/reader/books/{book_id}`，OpenAPI 文档见运行中服务的 `/docs`。列表和导出读取当前编辑状态。路由负责参数与响应校验，笔记服务负责视图与导出，编辑会话负责可撤销修改和事务保存；沿用现有段落标识，避免再按引文文本猜测位置。
+
+| 方法 | 路径（相对基路径） | 用途 |
+| --- | --- | --- |
+| GET / POST | `/annotations` | 分页列出 / 创建批注 |
+| PATCH / DELETE | `/annotations/{annotation_id}` | 更新备注或颜色 / 删除批注 |
+| GET | `/annotations/{annotation_id}/location` | 解析批注当前原文位置 |
+| GET / POST | `/bookmarks` | 分页列出 / 创建书签 |
+| DELETE | `/bookmarks/{bookmark_id}` | 删除书签 |
+| GET | `/bookmarks/{bookmark_id}/location` | 解析书签当前原文位置 |
+| GET | `/search?q=关键词` | 全书关键词搜索 |
+| GET | `/paragraphs/{edit_id}/location` | 点击搜索结果前重新解析段落位置 |
+| GET | `/notes/export?format=markdown` | 下载全部笔记，格式可选 `markdown` / `json` |
+
+列表和搜索使用 `offset`（默认 0）、`limit`（默认 50，范围 1–100）、可选 `chapter_index`（从 0 开始），返回 `{items, total, offset, limit, next_offset}`。搜索关键词去除首尾空白、长度 1–300，不区分大小写，按字面子串匹配，按章节与段落排序；空结果返回成功的空列表。搜索接口已从原数组响应改为分页对象。
+
+创建批注的请求体为 `{chapter_index, start_edit_id, end_edit_id, start_offset, end_offset, selected_text?, color?, comment?}`；偏移从 0 开始，以 Unicode 码点计数，终点不包含在选区内。创建书签为 `{chapter_index, edit_id, label?}`。书籍归属由 URL 决定，请求体不接受 `book_id` 或未知字段；批注 PATCH 仅接受 `comment`、`color`，清空备注传空字符串，拒绝空 PATCH 与 `null`。
+
+创建成功返回 201 和 `{annotation, state}` / `{bookmark, state}`；更新批注返回 200 和 `{annotation, state}`；删除返回 200 和 `EditorState`，便于更新保存与撤销状态。不存在或不属于该书的资源返回 404；原文定位失效返回 409；字段或范围无效返回 422。错误保留 FastAPI 的 `detail` 字段：业务错误为字符串，字段校验错误为结构化列表。
+
+列表条目提供 `chapter_title`、`excerpt`、完整 `quote` 与 `reader_location`；失效定位为 `null`。导出包含当前书籍全部笔记，不受分页限制，JSON 为 `{book, exported_at, has_unsaved_changes, annotations, bookmarks}`，时间为 UTC ISO 8601。`has_unsaved_changes` 表示共用编辑会话是否有未保存修改，与顶部保存状态一致；导出内容仍仅包含指定书籍。文件通过 `Content-Disposition` 的 UTF-8 文件名下载，不暴露 EPUB 本地路径。旧 `/api/editor/annotations` 创建与删除接口保留并在文档中标记弃用。
 
 ## 检查 chunking 质量
 

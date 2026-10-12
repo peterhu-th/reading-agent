@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bs4 import BeautifulSoup, UnicodeDammit
 from ebooklib import ITEM_DOCUMENT, epub
 
 HASH_BLOCK_SIZE = 1024 * 1024
 TITLE_SUFFIX_STARTERS = ("（", "(", "【", "[")
 TITLE_PREFIX_PATTERN = re.compile(r"^(?:【[^】]{1,20}】|\[[^\]]{1,20}\])\s*")
+XML_DECLARATION_PATTERN = re.compile(r"\A(\ufeff?\s*)<\?xml\s+[^?]*\?>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,23 @@ class BookMetadata:
     language: str | None = None
     publisher: str | None = None
     description: str | None = None
+
+
+def parse_epub_html(markup: bytes | str) -> BeautifulSoup:
+    """Parse EPUB HTML/XHTML with the reader's established HTML tree rules.
+
+    Keep lxml's HTML repair and named-entity handling so existing element paths
+    remain editable. Decode before removing the XML declaration to retain its
+    encoding; the declaration itself is not part of an element's source path.
+    NCX navigation is actual XML and should continue to use an XML parser.
+    """
+    if isinstance(markup, bytes):
+        decoded = UnicodeDammit(markup, is_html=True).unicode_markup
+        if decoded is None:
+            raise ValueError("Cannot decode EPUB HTML content")
+        markup = decoded
+    markup = XML_DECLARATION_PATTERN.sub(r"\1", markup, count=1)
+    return BeautifulSoup(markup, "lxml")
 
 
 def read_epub_file(epub_path: Path) -> epub.EpubBook:

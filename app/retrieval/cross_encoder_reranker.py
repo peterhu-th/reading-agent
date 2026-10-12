@@ -2,6 +2,7 @@ from functools import cached_property
 
 from app.config import get_settings
 from app.models.schemas import PlannedQuery, RetrievedChunk, RerankDebugInfo
+from app.retrieval.model_runtime import get_reranker_model
 
 
 class CrossEncoderReranker:
@@ -13,12 +14,10 @@ class CrossEncoderReranker:
 
     @cached_property
     def model(self):
-        from sentence_transformers import CrossEncoder
-
-        return CrossEncoder(
+        return get_reranker_model(
             self.settings.RERANK_MODEL,
-            device=self.settings.RERANK_DEVICE,
-            local_files_only=self.settings.EMBEDDING_LOCAL_FILES_ONLY,
+            self.settings.RERANK_DEVICE,
+            self.settings.EMBEDDING_LOCAL_FILES_ONLY,
         )
 
     def rerank(

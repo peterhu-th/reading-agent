@@ -3,13 +3,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import warnings
 from dataclasses import asdict, dataclass
 from itertools import groupby
 from pathlib import Path
 from typing import Any
 
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from ebooklib import epub
 
 from app.ingestion.epub_source import (
@@ -22,6 +20,7 @@ from app.ingestion.epub_source import (
     first_metadata_value,
     make_book_id,
     normalize_inline_text,
+    parse_epub_html,
     read_epub_file,
 )
 from app.ingestion.normalize import is_retrievable_paragraph, normalize_whitespace
@@ -29,8 +28,6 @@ from app.ingestion.reader_epub import load_epub_for_reader
 from app.models.schemas import BookParagraph, ReaderContentRecord
 
 DEFAULT_MAX_CHARS = 1000
-
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 
 @dataclass(frozen=True)
@@ -164,7 +161,7 @@ def is_retrievable_chapter(title: str | None) -> bool:
 
 def html_to_text(html: bytes | str) -> tuple[str, str | None]:
     """Convert one EPUB HTML document to clean text and an optional title."""
-    soup = BeautifulSoup(html, "lxml")
+    soup = parse_epub_html(html)
 
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()

@@ -86,6 +86,24 @@ def test_unchanged_chunks_reuse_vectors_with_matching_model(index_environment):
     assert collection(settings)._collection.metadata["embedding_model"] == "test-model-a"
 
 
+def test_requested_reset_reembeds_unchanged_chunks(index_environment):
+    settings, embeddings = index_environment
+    write_records(settings.CHUNKS_JSONL_PATH, [chunk()])
+    build_index.rebuild_index_with_stats()
+    embeddings.batches.clear()
+    old_collection_id = collection(settings)._collection.id
+
+    stats = build_index.rebuild_index_with_stats(force_reset=True)
+
+    assert stats.reset_collection
+    assert stats.indexed_chunks == 1
+    assert stats.skipped_chunks == 0
+    assert embeddings.batches == [[chunk().text]]
+    store = collection(settings)
+    assert store._collection.id != old_collection_id
+    assert store.get()["ids"] == [chunk().chunk_id]
+
+
 @pytest.mark.parametrize("dimension", [2, 3])
 def test_model_change_reembeds_unchanged_text_even_with_same_dimension(index_environment, dimension):
     settings, embeddings = index_environment
@@ -205,3 +223,35 @@ def test_missing_summary_file_does_not_clear_existing_collection(index_environme
         rebuild_summary_index.main()
 
     assert collection(settings, summary=True).get()["ids"] == ["keep"]
+
+
+def test_unchanged_book_summary_reuses_embedding_without_output(index_environment, capsys):
+    settings, embeddings = index_environment
+    record = summary("book").model_copy(update={"summary_type": "book", "chapter_index": None})
+    write_records(settings.SUMMARIES_JSONL_PATH, [record])
+    rebuild_summary_index.rebuild_summary_index()
+    embeddings.batches.clear()
+
+    stats = rebuild_summary_index.rebuild_summary_index()
+
+    assert stats.indexed_chunks == 0
+    assert stats.skipped_chunks == 1
+    assert embeddings.batches == []
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("changes", [{"text": "Edited summary text."}, {"title": "Edited title"}])
+def test_only_changed_summary_text_or_metadata_is_reembedded(index_environment, changes):
+    settings, embeddings = index_environment
+    unchanged = summary("unchanged")
+    changed = summary("changed")
+    write_records(settings.SUMMARIES_JSONL_PATH, [unchanged, changed])
+    rebuild_summary_index.rebuild_summary_index()
+    embeddings.batches.clear()
+    updated = changed.model_copy(update=changes)
+    write_records(settings.SUMMARIES_JSONL_PATH, [unchanged, updated])
+
+    stats = rebuild_summary_index.rebuild_summary_index()
+
+    assert stats.indexed_chunks == stats.skipped_chunks == 1
+    assert embeddings.batches == [[updated.text]]
